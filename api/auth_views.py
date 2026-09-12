@@ -1,35 +1,46 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework_simplejwt.tokens import RefreshToken
+from django.conf import settings
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from django.contrib.auth.hashers import make_password, check_password
+from django.utils import timezone
 from .models import Household
 import requests
 import os
 
 
 def get_tokens_for_user(household):
-    """Generate JWT tokens for a household user"""
+    """Generate JWT tokens for a household user without creating OutstandingToken entries."""
+    user_id_claim = settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id')
+
+    # Manually build a RefreshToken
     refresh = RefreshToken()
-    refresh['household_id'] = household.household_id
+    refresh[user_id_claim] = household.household_id
     refresh['email'] = household.email
     refresh['first_name'] = household.first_name
     refresh['last_name'] = household.last_name
 
+    # Build the access token off the refresh token (so it inherits the same claims)
+    access = refresh.access_token
+    access['email'] = household.email
+    access['first_name'] = household.first_name
+    access['last_name'] = household.last_name
+
     return {
         'refresh': str(refresh),
-        'access': str(refresh.access_token),
+        'access': str(access),
     }
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def register(request):
     """Register a new household account"""
     data = request.data
 
-    # Check required fields
     required_fields = ['first_name', 'last_name', 'email', 'password']
     for field in required_fields:
         if not data.get(field):
@@ -38,14 +49,12 @@ def register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-    # Check if email already exists
     if Household.objects.filter(email=data['email']).exists():
         return Response(
             {'error': 'Email already registered'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Create household account
     household = Household.objects.create(
         first_name=data['first_name'],
         last_name=data['last_name'],
@@ -76,6 +85,7 @@ def register(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def login(request):
     """Login with email and password"""
@@ -90,7 +100,6 @@ def login(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Find household by email
     try:
         household = Household.objects.get(email=email)
     except Household.DoesNotExist:
@@ -99,15 +108,12 @@ def login(request):
             status=status.HTTP_401_UNAUTHORIZED
         )
 
-    # Check password
     if not check_password(password, household.password):
         return Response(
             {'error': 'Invalid email or password'},
             status=status.HTTP_401_UNAUTHORIZED
         )
 
-    # Update last login
-    from django.utils import timezone
     household.last_login = timezone.now()
     household.save()
 
@@ -124,6 +130,7 @@ def login(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def google_login(request):
     """Login or register using Google OAuth token"""
@@ -135,7 +142,6 @@ def google_login(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Verify token with Google
     google_url = f'https://oauth2.googleapis.com/tokeninfo?id_token={google_token}'
     google_response = requests.get(google_url)
 
@@ -147,7 +153,6 @@ def google_login(request):
 
     google_data = google_response.json()
 
-    # Verify the token is for our app
     if google_data.get('aud') != os.getenv('GOOGLE_CLIENT_ID'):
         return Response(
             {'error': 'Token not valid for this application'},
@@ -158,18 +163,15 @@ def google_login(request):
     first_name = google_data.get('given_name', '')
     last_name = google_data.get('family_name', '')
 
-    # Check if household exists
     try:
         household = Household.objects.get(email=email)
-        # Existing user — log them in
         message = 'Login successful'
     except Household.DoesNotExist:
-        # New user — create account
         household = Household.objects.create(
             first_name=first_name,
             last_name=last_name,
             email=email,
-            password=make_password(None),  # No password for Google users
+            password=make_password(None),
             total_members=0,
             no_of_earners=0,
             no_of_dependents=0,
@@ -183,8 +185,6 @@ def google_login(request):
         )
         message = 'Account created successfully'
 
-    # Update last login
-    from django.utils import timezone
     household.last_login = timezone.now()
     household.save()
 
@@ -201,7 +201,8 @@ def google_login(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def logout(request):
     """Logout by blacklisting the refresh token"""
     try:
@@ -220,14 +221,36 @@ def logout(request):
 
 
 @api_view(['GET'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def debug_token(request):
+    """Debug endpoint to check token contents"""
+    auth_header = request.headers.get('Authorization', '')
+
+    if not auth_header:
+        return Response({'error': 'No Authorization header found'})
+
+    if not auth_header.startswith('Bearer '):
+        return Response({'error': 'Must start with Bearer'})
+
+    token = auth_header.split(' ')[1]
+
+    try:
+        decoded = AccessToken(token)
+        return Response({
+            'token_contents': dict(decoded),
+            'has_household_id': 'household_id' in decoded,
+        })
+    except Exception as e:
+        return Response({'error': str(e)})
+
+
+@api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_profile(request):
     """Get current logged in user profile"""
-    token = request.auth
-    household_id = token.get('household_id')
-
     try:
-        household = Household.objects.get(household_id=household_id)
+        household = request.user
         return Response({
             'household_id': household.household_id,
             'first_name': household.first_name,
@@ -238,8 +261,8 @@ def get_profile(request):
             'no_of_dependents': household.no_of_dependents,
             'housing_type': household.housing_type,
         }, status=status.HTTP_200_OK)
-    except Household.DoesNotExist:
+    except Exception as e:
         return Response(
-            {'error': 'User not found'},
-            status=status.HTTP_404_NOT_FOUND
+            {'error': str(e)},
+            status=status.HTTP_400_BAD_REQUEST
         )

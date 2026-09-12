@@ -1,23 +1,44 @@
 from django.db import models
 
+
 class Household(models.Model):
     household_id = models.AutoField(primary_key=True)
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
     password = models.CharField(max_length=255)
-    total_members = models.IntegerField()
-    no_of_earners = models.IntegerField()
-    no_of_dependents = models.IntegerField()
-    housing_type = models.CharField(max_length=100)
-    daily_food_expense_min = models.DecimalField(max_digits=10, decimal_places=2)
-    daily_food_expense_max = models.DecimalField(max_digits=10, decimal_places=2)
-    daily_transport_expense_min = models.DecimalField(max_digits=10, decimal_places=2)
-    daily_transport_expense_max = models.DecimalField(max_digits=10, decimal_places=2)
-    survival_threshold_min = models.DecimalField(max_digits=10, decimal_places=2)
-    survival_threshold_max = models.DecimalField(max_digits=10, decimal_places=2)
+    total_members = models.IntegerField(default=0)
+    no_of_earners = models.IntegerField(default=0)
+    no_of_dependents = models.IntegerField(default=0)
+    housing_type = models.CharField(max_length=100, blank=True)
+    daily_food_expense_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    daily_food_expense_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    daily_transport_expense_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    daily_transport_expense_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    survival_threshold_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    survival_threshold_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     last_login = models.DateTimeField(null=True, blank=True)
+
+    # ---- Required by DRF / SimpleJWT ----
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    @property
+    def is_active(self):
+        """Required by SimpleJWT's RefreshToken.for_user()"""
+        return True
+
+    @property
+    def pk(self):
+        """Explicitly expose household_id as the primary key"""
+        return self.household_id
 
     class Meta:
         db_table = 'household'
