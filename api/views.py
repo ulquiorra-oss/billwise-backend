@@ -3,14 +3,22 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import Household, Earner, Income, IncomeFrequency
+from .models import (
+    Household,
+    Earner,
+    Income,
+    IncomeFrequency,
+    ItemCategory,
+    BudgetItem,
+)
 from .serializers import (
     HouseholdSerializer,
     EarnerSerializer,
     IncomeSerializer,
     IncomeFrequencySerializer,
+    ItemCategorySerializer,
+    BudgetItemSerializer,
 )
-
 
 # ============================================================
 # HOUSEHOLD ENDPOINTS
@@ -341,5 +349,135 @@ def delete_income(request, income_id):
     income.delete()
     return Response(
         {'message': 'Income deleted successfully'},
+        status=status.HTTP_200_OK
+    )
+
+
+# ============================================================
+# CATEGORY ENDPOINTS
+# ============================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_categories(request):
+    """List all budget item categories."""
+    categories = ItemCategory.objects.all().order_by('category_id')
+    serializer = ItemCategorySerializer(categories, many=True)
+
+    return Response({
+        'count': categories.count(),
+        'categories': serializer.data
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_category(request):
+    """Create a new budget item category."""
+    serializer = ItemCategorySerializer(data=request.data)
+
+    if serializer.is_valid():
+        category = serializer.save()
+
+        return Response({
+            'message': 'Category created successfully',
+            'category': ItemCategorySerializer(category).data
+        }, status=status.HTTP_201_CREATED)
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+
+# ============================================================
+# BUDGET ITEM ENDPOINTS
+# ============================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_budget_items(request):
+    """List all budget items with their categories."""
+    budget_items = BudgetItem.objects.select_related(
+        'category'
+    ).order_by('item_id')
+
+    serializer = BudgetItemSerializer(budget_items, many=True)
+
+    return Response({
+        'count': budget_items.count(),
+        'budget_items': serializer.data
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_budget_item(request):
+    """Create a new budget item."""
+    serializer = BudgetItemSerializer(data=request.data)
+
+    if serializer.is_valid():
+        budget_item = serializer.save()
+
+        return Response({
+            'message': 'Budget item created successfully',
+            'budget_item': BudgetItemSerializer(budget_item).data
+        }, status=status.HTTP_201_CREATED)
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_budget_item(request, item_id):
+    """Update an existing budget item."""
+
+    try:
+        budget_item = BudgetItem.objects.get(item_id=item_id)
+    except BudgetItem.DoesNotExist:
+        return Response(
+            {'error': 'Budget item not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    serializer = BudgetItemSerializer(
+        budget_item,
+        data=request.data
+    )
+
+    if serializer.is_valid():
+        budget_item = serializer.save()
+
+        return Response({
+            'message': 'Budget item updated successfully',
+            'budget_item': BudgetItemSerializer(budget_item).data
+        }, status=status.HTTP_200_OK)
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_budget_item(request, item_id):
+    """Delete an existing budget item."""
+
+    try:
+        budget_item = BudgetItem.objects.get(item_id=item_id)
+    except BudgetItem.DoesNotExist:
+        return Response(
+            {'error': 'Budget item not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    budget_item.delete()
+
+    return Response(
+        {'message': 'Budget item deleted successfully'},
         status=status.HTTP_200_OK
     )

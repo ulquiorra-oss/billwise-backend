@@ -41,4 +41,42 @@ urlpatterns = [
     path('income/<int:income_id>/', views.get_income, name='get-income'),
     path('income/<int:income_id>/update/', views.update_income, name='update-income'),
     path('income/<int:income_id>/delete/', views.delete_income, name='delete-income'),
+
+    # ============================================================
+    # CATEGORIES
+    # ============================================================
+    path(
+        'categories/',
+        views.list_categories,
+        name='list-categories'
+    ),
+    path(
+        'categories/create/',
+        views.create_category,
+        name='create-category'
+    ),
+
+    # ============================================================
+    # BUDGET ITEMS
+    # ============================================================
+    path(
+        'budget-items/',
+        views.list_budget_items,
+        name='list-budget-items'
+    ),
+    path(
+        'budget-items/create/',
+        views.create_budget_item,
+        name='create-budget-item'
+    ),
+    path(
+        'budget-items/<int:item_id>/update/',
+        views.update_budget_item,
+        name='update-budget-item'
+    ),
+    path(
+        'budget-items/<int:item_id>/delete/',
+        views.delete_budget_item,
+        name='delete-budget-item'
+    ),
 ]

@@ -1,5 +1,12 @@
 from rest_framework import serializers
-from .models import Household, Earner, Income, IncomeFrequency
+from .models import (
+    Household,
+    Earner,
+    Income,
+    IncomeFrequency,
+    ItemCategory,
+    BudgetItem,
+)
 
 
 # ============================================================
@@ -85,3 +92,58 @@ class IncomeSerializer(serializers.ModelSerializer):
 
     def get_frequency_desc(self, obj):
         return obj.income_frequency.frequency_desc if obj.income_frequency else None
+
+
+# ============================================================
+# ITEM CATEGORY
+# ============================================================
+
+class ItemCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ItemCategory
+        fields = [
+            'category_id',
+            'category_desc',
+        ]
+        read_only_fields = ['category_id']
+
+
+# ============================================================
+# BUDGET ITEM
+# ============================================================
+
+class BudgetItemSerializer(serializers.ModelSerializer):
+    category_desc = serializers.CharField(
+        source='category.category_desc',
+        read_only=True
+    )
+
+    class Meta:
+        model = BudgetItem
+        fields = [
+            'item_id',
+            'category',
+            'category_desc',
+            'item_desc',
+            'due_day',
+            'grace_period_days',
+            'penalty_classification',
+        ]
+        read_only_fields = [
+            'item_id',
+            'category_desc',
+        ]
+
+    def validate_due_day(self, value):
+        if value < 1 or value > 31:
+            raise serializers.ValidationError(
+                'due_day must be between 1 and 31.'
+            )
+        return value
+
+    def validate_grace_period_days(self, value):
+        if value < 0:
+            raise serializers.ValidationError(
+                'grace_period_days cannot be negative.'
+            )
+        return value
