@@ -79,4 +79,39 @@ urlpatterns = [
         views.delete_budget_item,
         name='delete-budget-item'
     ),
+
+    # ============================================================
+    # BILLS
+    # ============================================================
+
+    path(
+        'bills/create/',
+        views.create_bill,
+        name='create-bill'
+    ),
+    path(
+        'bills/',
+        views.list_bills,
+        name='list-bills'
+    ),
+     path(
+        'bills/prioritize/',
+        views.prioritize_bills,
+        name='prioritize-bills'
+    ),
+    path(
+        'bills/prioritized/',
+        views.prioritized_bills,
+        name='prioritized-bills'
+    ),
+    path(
+        'bills/<int:allocation_id>/',
+        views.bill_detail,
+        name='bill-detail'
+    ),
+    path(
+        'bills/<int:allocation_id>/confirm/',
+        views.confirm_bill,
+        name='confirm-bill'
+    ),
 ]

@@ -1,4 +1,5 @@
 from rest_framework import serializers
+
 from .models import (
     Household,
     Earner,
@@ -6,6 +7,7 @@ from .models import (
     IncomeFrequency,
     ItemCategory,
     BudgetItem,
+    BudgetAllocation,
 )
 
 
@@ -34,7 +36,12 @@ class HouseholdSerializer(serializers.ModelSerializer):
             'created_at',
             'last_login',
         ]
-        read_only_fields = ['household_id', 'email', 'created_at', 'last_login']
+        read_only_fields = [
+            'household_id',
+            'email',
+            'created_at',
+            'last_login',
+        ]
 
 
 # ============================================================
@@ -50,7 +57,10 @@ class EarnerSerializer(serializers.ModelSerializer):
             'earner_fname',
             'earner_lname',
         ]
-        read_only_fields = ['earner_id', 'household']
+        read_only_fields = [
+            'earner_id',
+            'household',
+        ]
 
 
 # ============================================================
@@ -60,8 +70,13 @@ class EarnerSerializer(serializers.ModelSerializer):
 class IncomeFrequencySerializer(serializers.ModelSerializer):
     class Meta:
         model = IncomeFrequency
-        fields = ['frequency_id', 'frequency_desc']
-        read_only_fields = ['frequency_id']
+        fields = [
+            'frequency_id',
+            'frequency_desc',
+        ]
+        read_only_fields = [
+            'frequency_id',
+        ]
 
 
 # ============================================================
@@ -85,7 +100,11 @@ class IncomeSerializer(serializers.ModelSerializer):
             'income_startdate',
             'next_payday',
         ]
-        read_only_fields = ['income_id', 'earner_name', 'frequency_desc']
+        read_only_fields = [
+            'income_id',
+            'earner_name',
+            'frequency_desc',
+        ]
 
     def get_earner_name(self, obj):
         return f"{obj.earner.earner_fname} {obj.earner.earner_lname}"
@@ -105,7 +124,9 @@ class ItemCategorySerializer(serializers.ModelSerializer):
             'category_id',
             'category_desc',
         ]
-        read_only_fields = ['category_id']
+        read_only_fields = [
+            'category_id',
+        ]
 
 
 # ============================================================
@@ -115,7 +136,7 @@ class ItemCategorySerializer(serializers.ModelSerializer):
 class BudgetItemSerializer(serializers.ModelSerializer):
     category_desc = serializers.CharField(
         source='category.category_desc',
-        read_only=True
+        read_only=True,
     )
 
     class Meta:
@@ -147,3 +168,45 @@ class BudgetItemSerializer(serializers.ModelSerializer):
                 'grace_period_days cannot be negative.'
             )
         return value
+
+
+# ============================================================
+# BILL / BUDGET ALLOCATION
+# ============================================================
+
+class BudgetAllocationSerializer(serializers.ModelSerializer):
+    item_desc = serializers.CharField(
+        source='item.item_desc',
+        read_only=True,
+    )
+    category_desc = serializers.CharField(
+        source='item.category.category_desc',
+        read_only=True,
+    )
+
+    class Meta:
+        model = BudgetAllocation
+        fields = [
+            'budget_allocation_id',
+            'income',
+            'item',
+            'item_desc',
+            'category_desc',
+            'amount',
+            'actual_due_date',
+            'image_path',
+            'scan_date',
+            'is_confirmed',
+            'budget_amount_range',
+            'budget_start_date',
+            'budget_end_date',
+            'budget_classification',
+            'priority_level',
+            'period_half',
+            'bill_reminder',
+        ]
+        read_only_fields = [
+            'budget_allocation_id',
+            'item_desc',
+            'category_desc',
+        ]

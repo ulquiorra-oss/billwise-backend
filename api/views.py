@@ -10,6 +10,7 @@ from .models import (
     IncomeFrequency,
     ItemCategory,
     BudgetItem,
+    BudgetAllocation,
 )
 from .serializers import (
     HouseholdSerializer,
@@ -18,6 +19,7 @@ from .serializers import (
     IncomeFrequencySerializer,
     ItemCategorySerializer,
     BudgetItemSerializer,
+    BudgetAllocationSerializer,
 )
 
 # ============================================================
@@ -479,5 +481,319 @@ def delete_budget_item(request, item_id):
 
     return Response(
         {'message': 'Budget item deleted successfully'},
+        status=status.HTTP_200_OK
+    )
+
+
+# ============================================================
+# BILLS / BUDGET ALLOCATIONS
+# ============================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_bill(request):
+    household = request.user
+
+    # Make sure the selected income belongs to this household
+    try:
+        income = Income.objects.get(
+            income_id=request.data.get('income'),
+            earner__household=household
+        )
+    except Income.DoesNotExist:
+        return Response(
+            {'error': 'Income not found for this household.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    data = request.data.copy()
+    data['income'] = income.income_id
+
+    serializer = BudgetAllocationSerializer(data=data)
+
+    if serializer.is_valid():
+        bill = serializer.save()
+        return Response(
+            BudgetAllocationSerializer(bill).data,
+            status=status.HTTP_201_CREATED
+        )
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_bills(request):
+    household = request.user
+
+    bills = BudgetAllocation.objects.filter(
+        income__earner__household=household
+    ).select_related(
+        'income',
+        'item',
+        'item__category'
+    )
+
+    serializer = BudgetAllocationSerializer(bills, many=True)
+
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def bill_detail(request, allocation_id):
+    household = request.user
+
+    try:
+        bill = BudgetAllocation.objects.select_related(
+            'income',
+            'item',
+            'item__category'
+        ).get(
+            budget_allocation_id=allocation_id,
+            income__earner__household=household
+        )
+    except BudgetAllocation.DoesNotExist:
+        return Response(
+            {'error': 'Bill not found.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == 'GET':
+        serializer = BudgetAllocationSerializer(bill)
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK
+        )
+
+    bill.delete()
+
+    return Response(
+        {'message': 'Bill deleted successfully.'},
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def confirm_bill(request, allocation_id):
+    household = request.user
+
+    try:
+        bill = BudgetAllocation.objects.get(
+            budget_allocation_id=allocation_id,
+            income__earner__household=household
+        )
+    except BudgetAllocation.DoesNotExist:
+        return Response(
+            {'error': 'Bill not found.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    data = request.data.copy()
+    data['is_confirmed'] = True
+
+    serializer = BudgetAllocationSerializer(
+        bill,
+        data=data,
+        partial=True
+    )
+
+    if serializer.is_valid():
+        bill = serializer.save()
+
+        return Response(
+            BudgetAllocationSerializer(bill).data,
+            status=status.HTTP_200_OK
+        )
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+# ============================================================
+# BILL PRIORITIZATION / RULE ENGINE
+# ============================================================
+
+def classify_bill(bill):
+    """
+    Classifies a bill based on the rules defined in the
+    Capstone documentation.
+
+    The bill type is determined from the bill/item description
+    using the examples provided in the documentation:
+    Essential: Electricity, Water, Rent, Loan
+    Important: Internet, Subscription
+    Discretionary: Groceries, Shopping, Entertainment
+    """
+
+    item_desc = (bill.item.item_desc or '').lower()
+
+    # Determine bill category based on the examples in the capstone.
+    if any(keyword in item_desc for keyword in [
+        'electricity',
+        'water',
+        'rent',
+        'loan'
+    ]):
+        bill_type = 'essential'
+
+    elif any(keyword in item_desc for keyword in [
+        'internet',
+        'subscription'
+    ]):
+        bill_type = 'important'
+
+    elif any(keyword in item_desc for keyword in [
+        'groceries',
+        'shopping',
+        'entertainment'
+    ]):
+        bill_type = 'discretionary'
+
+    else:
+        # No documented example matches this bill.
+        return None, None
+
+    penalty = bill.item.penalty_classification
+    grace_period = bill.item.grace_period_days
+    due_date = bill.actual_due_date
+
+    # --------------------------------------------------------
+    # RULE 1
+    # Essential + penalty + no grace period
+    # => HIGH + NON-DEFERRABLE
+    # --------------------------------------------------------
+    if (
+        bill_type == 'essential'
+        and penalty is True
+        and grace_period == 0
+    ):
+        return 'High', 'Non-deferrable'
+
+    # --------------------------------------------------------
+    # RULE 2
+    # Essential + penalty + grace period > 0
+    # + due date within current pay period
+    # => HIGH + NON-DEFERRABLE
+    # --------------------------------------------------------
+    if (
+        bill_type == 'essential'
+        and penalty is True
+        and grace_period > 0
+        and due_date is not None
+        and bill.budget_start_date <= due_date <= bill.budget_end_date
+    ):
+        return 'High', 'Non-deferrable'
+
+    # --------------------------------------------------------
+    # RULE 3
+    # Important + penalty + grace period > 0
+    # => MEDIUM + DEFERRABLE
+    # --------------------------------------------------------
+    if (
+        bill_type == 'important'
+        and penalty is True
+        and grace_period > 0
+    ):
+        return 'Medium', 'Deferrable'
+
+    # --------------------------------------------------------
+    # RULE 4a
+    # Discretionary + no penalty
+    # => LOW + DEFERRABLE
+    # --------------------------------------------------------
+    if (
+        bill_type == 'discretionary'
+        and penalty is False
+    ):
+        return 'Low', 'Deferrable'
+
+    # --------------------------------------------------------
+    # RULE 4b
+    # Discretionary + penalty
+    # => MEDIUM + DEFERRABLE
+    # --------------------------------------------------------
+    if (
+        bill_type == 'discretionary'
+        and penalty is True
+    ):
+        return 'Medium', 'Deferrable'
+
+    # No documented rule matches the bill.
+    return None, None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def prioritize_bills(request):
+    household = request.user
+
+    bills = BudgetAllocation.objects.filter(
+        income__earner__household=household,
+        is_confirmed=True
+    ).select_related(
+        'income',
+        'item',
+        'item__category'
+    )
+
+    prioritized_count = 0
+    unclassified_count = 0
+
+    for bill in bills:
+        priority, classification = classify_bill(bill)
+
+        bill.priority_level = priority
+        bill.budget_classification = classification
+
+        bill.save(
+            update_fields=[
+                'priority_level',
+                'budget_classification'
+            ]
+        )
+
+        if priority is not None:
+            prioritized_count += 1
+        else:
+            unclassified_count += 1
+
+    return Response(
+        {
+            'message': 'Bill prioritization completed.',
+            'prioritized_count': prioritized_count,
+            'unclassified_count': unclassified_count
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def prioritized_bills(request):
+    household = request.user
+
+    bills = BudgetAllocation.objects.filter(
+        income__earner__household=household,
+        priority_level__isnull=False
+    ).select_related(
+        'income',
+        'item',
+        'item__category'
+    )
+
+    serializer = BudgetAllocationSerializer(
+        bills,
+        many=True
+    )
+
+    return Response(
+        serializer.data,
         status=status.HTTP_200_OK
     )
