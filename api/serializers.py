@@ -210,3 +210,23 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'item_desc',
             'category_desc',
         ]
+        
+# ============================================================
+# RISK ASSESSMENT RESPONSE
+# ============================================================
+
+class RiskAssessmentSerializer(serializers.Serializer):
+    """Response shape for GET /api/risk/assess/"""
+    combined_income = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_bill_allocations = serializers.DecimalField(max_digits=12, decimal_places=2)
+    remaining_budget_min = serializers.DecimalField(max_digits=12, decimal_places=2)
+    remaining_budget_max = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_daily_expense_min = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_daily_expense_max = serializers.DecimalField(max_digits=10, decimal_places=2)
+    days_until_next_payday = serializers.IntegerField()
+    total_daily_need_min = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_daily_need_max = serializers.DecimalField(max_digits=12, decimal_places=2)
+    risk_level = serializers.CharField()       # LOW RISK / MODERATE RISK / HIGH RISK
+    color_indicator = serializers.CharField()  # GREEN / AMBER / RED
+    label = serializers.CharField()            # STABLE / AT RISK / CRITICAL
+    next_payday = serializers.DateField(allow_null=True)

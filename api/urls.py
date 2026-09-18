@@ -45,73 +45,41 @@ urlpatterns = [
     # ============================================================
     # CATEGORIES
     # ============================================================
-    path(
-        'categories/',
-        views.list_categories,
-        name='list-categories'
-    ),
-    path(
-        'categories/create/',
-        views.create_category,
-        name='create-category'
-    ),
+    path('categories/', views.list_categories, name='list-categories'),
+    path('categories/create/', views.create_category, name='create-category'),
 
     # ============================================================
     # BUDGET ITEMS
     # ============================================================
-    path(
-        'budget-items/',
-        views.list_budget_items,
-        name='list-budget-items'
-    ),
-    path(
-        'budget-items/create/',
-        views.create_budget_item,
-        name='create-budget-item'
-    ),
-    path(
-        'budget-items/<int:item_id>/update/',
-        views.update_budget_item,
-        name='update-budget-item'
-    ),
-    path(
-        'budget-items/<int:item_id>/delete/',
-        views.delete_budget_item,
-        name='delete-budget-item'
-    ),
+    path('budget-items/', views.list_budget_items, name='list-budget-items'),
+    path('budget-items/create/', views.create_budget_item, name='create-budget-item'),
+    path('budget-items/<int:item_id>/update/', views.update_budget_item, name='update-budget-item'),
+    path('budget-items/<int:item_id>/delete/', views.delete_budget_item, name='delete-budget-item'),
 
     # ============================================================
     # BILLS
     # ============================================================
+    path('bills/create/', views.create_bill, name='create-bill'),
+    path('bills/', views.list_bills, name='list-bills'),
+    path('bills/prioritize/', views.prioritize_bills, name='prioritize-bills'),
+    path('bills/prioritized/', views.prioritized_bills, name='prioritized-bills'),
+    path('bills/scan/', views.scan_bill, name='scan-bill'),
+    path('bills/<int:allocation_id>/', views.bill_detail, name='bill-detail'),
+    path('bills/<int:allocation_id>/confirm/', views.confirm_bill, name='confirm-bill'),
 
-    path(
-        'bills/create/',
-        views.create_bill,
-        name='create-bill'
-    ),
-    path(
-        'bills/',
-        views.list_bills,
-        name='list-bills'
-    ),
-     path(
-        'bills/prioritize/',
-        views.prioritize_bills,
-        name='prioritize-bills'
-    ),
-    path(
-        'bills/prioritized/',
-        views.prioritized_bills,
-        name='prioritized-bills'
-    ),
-    path(
-        'bills/<int:allocation_id>/',
-        views.bill_detail,
-        name='bill-detail'
-    ),
-    path(
-        'bills/<int:allocation_id>/confirm/',
-        views.confirm_bill,
-        name='confirm-bill'
-    ),
+    # ============================================================
+    # PRIORITY 6: RISK ASSESSMENT & RECOMMENDATIONS
+    # ============================================================
+    path('risk/assess/', views.assess_risk, name='assess-risk'),
+    path('recommendations/', views.get_recommendations, name='recommendations'),
+
+    # ============================================================
+    # PRIORITY 7: BUDGET ALLOCATION SUMMARY
+    # ============================================================
+    path('budget/allocation/', views.budget_allocation_summary, name='budget-allocation'),
+
+    # ============================================================
+    # PRIORITY 8: NOTIFICATIONS / DUE REMINDERS
+    # ============================================================
+    path('notifications/', views.list_notifications, name='list-notifications'),
 ]
