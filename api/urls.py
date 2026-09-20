@@ -3,6 +3,7 @@ from . import auth_views
 from . import views
 from . import app_views
 from . import setup_views
+from . import edit_views
 
 
 urlpatterns = [
@@ -185,4 +186,12 @@ urlpatterns = [
         views.list_notifications,
         name='list-notifications',
     ),
+
+    path('setup/current/', edit_views.current_setup, name='setup-current'),
+    path('setup/household/', edit_views.update_household_setup, name='setup-household'),
+    path('setup/income/', edit_views.update_income_setup, name='setup-income'),
+    path('setup/ranges/', edit_views.update_ranges_setup, name='setup-ranges'),
+    path('setup/bills/', edit_views.create_setup_bill, name='setup-bill-create'),
+    path('setup/bills/amounts/', edit_views.update_bill_amounts, name='setup-bill-amounts'),
+    path('setup/bills/<int:allocation_id>/', edit_views.setup_bill_detail, name='setup-bill-detail'),
 ]
