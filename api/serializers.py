@@ -33,12 +33,14 @@ class HouseholdSerializer(serializers.ModelSerializer):
             'daily_transport_expense_max',
             'survival_threshold_min',
             'survival_threshold_max',
+            'setup_completed',
             'created_at',
             'last_login',
         ]
         read_only_fields = [
             'household_id',
             'email',
+            'setup_completed',
             'created_at',
             'last_login',
         ]
@@ -110,7 +112,11 @@ class IncomeSerializer(serializers.ModelSerializer):
         return f"{obj.earner.earner_fname} {obj.earner.earner_lname}"
 
     def get_frequency_desc(self, obj):
-        return obj.income_frequency.frequency_desc if obj.income_frequency else None
+        return (
+            obj.income_frequency.frequency_desc
+            if obj.income_frequency
+            else None
+        )
 
 
 # ============================================================
@@ -179,19 +185,43 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
         source='item.item_desc',
         read_only=True,
     )
+
     category_desc = serializers.CharField(
         source='item.category.category_desc',
         read_only=True,
     )
 
+    # Read-only BudgetItem fields needed by the Budget tab
+    grace_period_days = serializers.IntegerField(
+        source='item.grace_period_days',
+        read_only=True,
+    )
+
+    penalty_classification = serializers.BooleanField(
+        source='item.penalty_classification',
+        read_only=True,
+    )
+
+    due_day = serializers.IntegerField(
+        source='item.due_day',
+        read_only=True,
+    )
+
     class Meta:
         model = BudgetAllocation
+
         fields = [
             'budget_allocation_id',
             'income',
             'item',
             'item_desc',
             'category_desc',
+
+            # BudgetItem fields
+            'grace_period_days',
+            'penalty_classification',
+            'due_day',
+
             'amount',
             'actual_due_date',
             'image_path',
@@ -204,29 +234,85 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'priority_level',
             'period_half',
             'bill_reminder',
+
+            # Payment status
+            'is_paid',
+            'paid_date',
         ]
+
         read_only_fields = [
             'budget_allocation_id',
             'item_desc',
             'category_desc',
+
+            # BudgetItem fields are read-only because they come from item
+            'grace_period_days',
+            'penalty_classification',
+            'due_day',
+
+            # Automatically set when the bill is marked as paid
+            'paid_date',
         ]
-        
+
+
 # ============================================================
 # RISK ASSESSMENT RESPONSE
 # ============================================================
 
 class RiskAssessmentSerializer(serializers.Serializer):
     """Response shape for GET /api/risk/assess/"""
-    combined_income = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_bill_allocations = serializers.DecimalField(max_digits=12, decimal_places=2)
-    remaining_budget_min = serializers.DecimalField(max_digits=12, decimal_places=2)
-    remaining_budget_max = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_daily_expense_min = serializers.DecimalField(max_digits=10, decimal_places=2)
-    total_daily_expense_max = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    combined_income = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    total_bill_allocations = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    remaining_budget_min = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    remaining_budget_max = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    total_daily_expense_min = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    total_daily_expense_max = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
     days_until_next_payday = serializers.IntegerField()
-    total_daily_need_min = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_daily_need_max = serializers.DecimalField(max_digits=12, decimal_places=2)
-    risk_level = serializers.CharField()       # LOW RISK / MODERATE RISK / HIGH RISK
-    color_indicator = serializers.CharField()  # GREEN / AMBER / RED
-    label = serializers.CharField()            # STABLE / AT RISK / CRITICAL
-    next_payday = serializers.DateField(allow_null=True)
+
+    total_daily_need_min = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    total_daily_need_max = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2
+    )
+
+    risk_level = serializers.CharField()
+    # LOW RISK / MODERATE RISK / HIGH RISK
+
+    color_indicator = serializers.CharField()
+    # GREEN / AMBER / RED
+
+    label = serializers.CharField()
+    # STABLE / AT RISK / CRITICAL
+
+    next_payday = serializers.DateField(
+        allow_null=True
+    )
