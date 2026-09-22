@@ -85,10 +85,19 @@ def _range(value, label):
 
 
 def _classify_and_save(bill):
-    priority, classification = classify_bill(bill)
+    """
+    Runs the rule engine and stores the priority, classification, and rule ID.
+    classify_bill() returns: (priority, classification, rule_applied, reason)
+    """
+    priority, classification, rule_id, reason = classify_bill(bill)
     bill.priority_level = priority
     bill.budget_classification = classification
-    bill.save(update_fields=['priority_level', 'budget_classification'])
+    bill.rule_applied = rule_id
+    bill.save(update_fields=[
+        'priority_level',
+        'budget_classification',
+        'rule_applied',
+    ])
 
 
 def _category(label):

@@ -50,11 +50,7 @@ def update_household(request):
     """Update the current household's profile."""
     household = request.user
     partial = request.method == 'PATCH'
-    serializer = HouseholdSerializer(
-        household,
-        data=request.data,
-        partial=partial
-    )
+    serializer = HouseholdSerializer(household, data=request.data, partial=partial)
 
     if serializer.is_valid():
         serializer.save()
@@ -116,10 +112,7 @@ def get_earner(request, earner_id):
     household = request.user
 
     try:
-        earner = Earner.objects.get(
-            earner_id=earner_id,
-            household=household
-        )
+        earner = Earner.objects.get(earner_id=earner_id, household=household)
     except Earner.DoesNotExist:
         return Response(
             {'error': 'Earner not found'},
@@ -136,10 +129,7 @@ def update_earner(request, earner_id):
     household = request.user
 
     try:
-        earner = Earner.objects.get(
-            earner_id=earner_id,
-            household=household
-        )
+        earner = Earner.objects.get(earner_id=earner_id, household=household)
     except Earner.DoesNotExist:
         return Response(
             {'error': 'Earner not found'},
@@ -147,24 +137,16 @@ def update_earner(request, earner_id):
         )
 
     partial = request.method == 'PATCH'
-    serializer = EarnerSerializer(
-        earner,
-        data=request.data,
-        partial=partial
-    )
+    serializer = EarnerSerializer(earner, data=request.data, partial=partial)
 
     if serializer.is_valid():
         serializer.save()
-
         return Response({
             'message': 'Earner updated successfully',
             'earner': serializer.data
         }, status=status.HTTP_200_OK)
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['DELETE'])
@@ -173,10 +155,7 @@ def delete_earner(request, earner_id):
     household = request.user
 
     try:
-        earner = Earner.objects.get(
-            earner_id=earner_id,
-            household=household
-        )
+        earner = Earner.objects.get(earner_id=earner_id, household=household)
     except Earner.DoesNotExist:
         return Response(
             {'error': 'Earner not found'},
@@ -253,10 +232,7 @@ def create_income(request):
             )
 
     try:
-        earner = Earner.objects.get(
-            earner_id=data['earner'],
-            household=household
-        )
+        earner = Earner.objects.get(earner_id=data['earner'], household=household)
     except Earner.DoesNotExist:
         return Response(
             {'error': 'Earner not found in your household'},
@@ -264,9 +240,7 @@ def create_income(request):
         )
 
     try:
-        frequency = IncomeFrequency.objects.get(
-            frequency_id=data['income_frequency']
-        )
+        frequency = IncomeFrequency.objects.get(frequency_id=data['income_frequency'])
     except IncomeFrequency.DoesNotExist:
         return Response(
             {'error': 'Invalid income_frequency'},
@@ -296,8 +270,7 @@ def get_income(request, income_id):
 
     try:
         income = Income.objects.select_related(
-            'earner',
-            'income_frequency'
+            'earner', 'income_frequency'
         ).get(
             income_id=income_id,
             earner__household=household
@@ -318,10 +291,7 @@ def update_income(request, income_id):
     household = request.user
 
     try:
-        income = Income.objects.get(
-            income_id=income_id,
-            earner__household=household
-        )
+        income = Income.objects.get(income_id=income_id, earner__household=household)
     except Income.DoesNotExist:
         return Response(
             {'error': 'Income not found'},
@@ -332,10 +302,7 @@ def update_income(request, income_id):
 
     if 'earner' in data:
         try:
-            new_earner = Earner.objects.get(
-                earner_id=data['earner'],
-                household=household
-            )
+            new_earner = Earner.objects.get(earner_id=data['earner'], household=household)
             income.earner = new_earner
         except Earner.DoesNotExist:
             return Response(
@@ -345,9 +312,7 @@ def update_income(request, income_id):
 
     if 'income_frequency' in data:
         try:
-            new_freq = IncomeFrequency.objects.get(
-                frequency_id=data['income_frequency']
-            )
+            new_freq = IncomeFrequency.objects.get(frequency_id=data['income_frequency'])
             income.income_frequency = new_freq
         except IncomeFrequency.DoesNotExist:
             return Response(
@@ -355,11 +320,7 @@ def update_income(request, income_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-    for field in [
-        'range_amount',
-        'income_startdate',
-        'next_payday'
-    ]:
+    for field in ['range_amount', 'income_startdate', 'next_payday']:
         if field in data:
             setattr(income, field, data[field])
 
@@ -379,10 +340,7 @@ def delete_income(request, income_id):
     household = request.user
 
     try:
-        income = Income.objects.get(
-            income_id=income_id,
-            earner__household=household
-        )
+        income = Income.objects.get(income_id=income_id, earner__household=household)
     except Income.DoesNotExist:
         return Response(
             {'error': 'Income not found'},
@@ -426,10 +384,7 @@ def create_category(request):
             'category': ItemCategorySerializer(category).data
         }, status=status.HTTP_201_CREATED)
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ============================================================
@@ -439,14 +394,8 @@ def create_category(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_budget_items(request):
-    budget_items = BudgetItem.objects.select_related(
-        'category'
-    ).order_by('item_id')
-
-    serializer = BudgetItemSerializer(
-        budget_items,
-        many=True
-    )
+    budget_items = BudgetItem.objects.select_related('category').order_by('item_id')
+    serializer = BudgetItemSerializer(budget_items, many=True)
 
     return Response({
         'count': budget_items.count(),
@@ -467,29 +416,21 @@ def create_budget_item(request):
             'budget_item': BudgetItemSerializer(budget_item).data
         }, status=status.HTTP_201_CREATED)
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def update_budget_item(request, item_id):
     try:
-        budget_item = BudgetItem.objects.get(
-            item_id=item_id
-        )
+        budget_item = BudgetItem.objects.get(item_id=item_id)
     except BudgetItem.DoesNotExist:
         return Response(
             {'error': 'Budget item not found'},
             status=status.HTTP_404_NOT_FOUND
         )
 
-    serializer = BudgetItemSerializer(
-        budget_item,
-        data=request.data
-    )
+    serializer = BudgetItemSerializer(budget_item, data=request.data)
 
     if serializer.is_valid():
         budget_item = serializer.save()
@@ -499,19 +440,14 @@ def update_budget_item(request, item_id):
             'budget_item': BudgetItemSerializer(budget_item).data
         }, status=status.HTTP_200_OK)
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
 def delete_budget_item(request, item_id):
     try:
-        budget_item = BudgetItem.objects.get(
-            item_id=item_id
-        )
+        budget_item = BudgetItem.objects.get(item_id=item_id)
     except BudgetItem.DoesNotExist:
         return Response(
             {'error': 'Budget item not found'},
@@ -559,10 +495,7 @@ def create_bill(request):
             status=status.HTTP_201_CREATED
         )
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET'])
@@ -578,15 +511,9 @@ def list_bills(request):
         'item__category'
     )
 
-    serializer = BudgetAllocationSerializer(
-        bills,
-        many=True
-    )
+    serializer = BudgetAllocationSerializer(bills, many=True)
 
-    return Response(
-        serializer.data,
-        status=status.HTTP_200_OK
-    )
+    return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 @api_view(['GET', 'DELETE'])
@@ -611,10 +538,7 @@ def bill_detail(request, allocation_id):
 
     if request.method == 'GET':
         serializer = BudgetAllocationSerializer(bill)
-        return Response(
-            serializer.data,
-            status=status.HTTP_200_OK
-        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     bill.delete()
 
@@ -643,11 +567,7 @@ def confirm_bill(request, allocation_id):
     data = request.data.copy()
     data['is_confirmed'] = True
 
-    serializer = BudgetAllocationSerializer(
-        bill,
-        data=data,
-        partial=True
-    )
+    serializer = BudgetAllocationSerializer(bill, data=data, partial=True)
 
     if serializer.is_valid():
         bill = serializer.save()
@@ -657,10 +577,7 @@ def confirm_bill(request, allocation_id):
             status=status.HTTP_200_OK
         )
 
-    return Response(
-        serializer.errors,
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ============================================================
@@ -668,70 +585,164 @@ def confirm_bill(request, allocation_id):
 # ============================================================
 
 def classify_bill(bill):
-    """Classifies a bill based on the rules defined in the Capstone documentation."""
+    """
+    Classifies a bill based on Chapter III rules (Section 3.1.2.2),
+    extended to cover combinations the original rules did not address
+    so that every confirmed bill receives a classification.
 
+    Chapter III rules:
+        Rule 1: Essential + Penalty + Grace = 0    -> High / Non-deferrable
+        Rule 2: Essential + Penalty + Grace > 0    -> High / Non-deferrable
+        Rule 3: Important + Penalty + Grace > 0    -> Medium / Deferrable
+        Rule 4a: Discretionary + No penalty        -> Low / Deferrable
+        Rule 4b: Discretionary + Penalty           -> Medium / Deferrable
+
+    Extensions (same principle, fill the gaps):
+        Extension A: Essential + Penalty + Grace > 0 but outside period -> Medium / Deferrable
+        Extension B: Essential + No penalty                              -> Medium / Deferrable
+        Extension C: Important + Penalty + Grace = 0                     -> Medium / Deferrable
+        Extension D: Important + No penalty                              -> Low / Deferrable
+
+    Returns:
+        tuple: (priority_level, budget_classification, rule_id, reason)
+    """
+    item_desc = (bill.item.item_desc or '').lower() if bill.item else ''
     category_desc = (
-        bill.item.category.category_desc
-        if bill.item.category
-        else ''
-    )
+        bill.item.category.category_desc or ''
+    ).lower() if bill.item and bill.item.category else ''
 
-    item_desc = (
-        f"{bill.item.item_desc or ''} {category_desc}"
-    ).lower()
+    # ---- Category group detection ----
+    essential_categories = {
+        'utilities', 'housing', 'loans', 'transportation',
+        'electricity', 'water', 'gas', 'rent',
+    }
+    important_categories = {
+        'communication', 'education',
+        'internet', 'subscription', 'phone', 'mobile', 'cable',
+    }
+    discretionary_categories = {
+        'food', 'personal', 'other',
+        'groceries', 'grocery', 'shopping', 'entertainment',
+    }
 
-    if any(
-        kw in item_desc
-        for kw in ['electric', 'water', 'rent', 'loan']
-    ):
+    if category_desc in essential_categories:
         bill_type = 'essential'
-
-    elif any(
-        kw in item_desc
-        for kw in ['internet', 'subscription']
-    ):
+    elif category_desc in important_categories:
         bill_type = 'important'
-
-    elif any(
-        kw in item_desc
-        for kw in ['groceries', 'shopping', 'entertainment']
-    ):
+    elif category_desc in discretionary_categories:
         bill_type = 'discretionary'
-
+    # Fallback: match by item_desc keywords
+    elif any(kw in item_desc for kw in ['electricity', 'water', 'rent', 'loan', 'gas']):
+        bill_type = 'essential'
+    elif any(kw in item_desc for kw in ['internet', 'subscription', 'subscribe',
+                                        'wifi', 'cable', 'phone', 'mobile']):
+        bill_type = 'important'
+    elif any(kw in item_desc for kw in ['groceries', 'grocery',
+                                        'shopping', 'entertainment']):
+        bill_type = 'discretionary'
     else:
-        return None, None
+        return (
+            'Medium', 'Deferrable', 'Fallback',
+            'Category could not be determined. Conservative default applied.'
+        )
 
     penalty = bill.item.penalty_classification
-    grace_period = bill.item.grace_period_days
+    grace = bill.item.grace_period_days
     due_date = bill.actual_due_date
-
-    # Rule 1
-    if bill_type == 'essential' and penalty is True and grace_period == 0:
-        return 'High', 'Non-deferrable'
-
-    # Rule 2
-    if (
-        bill_type == 'essential'
-        and penalty is True
-        and grace_period > 0
-        and due_date is not None
+    in_period = (
+        due_date is not None
+        and bill.budget_start_date is not None
+        and bill.budget_end_date is not None
         and bill.budget_start_date <= due_date <= bill.budget_end_date
-    ):
-        return 'High', 'Non-deferrable'
+    )
 
-    # Rule 3
-    if bill_type == 'important' and penalty is True and grace_period > 0:
-        return 'Medium', 'Deferrable'
+    # ==========================================================
+    # ESSENTIAL CATEGORY
+    # ==========================================================
 
-    # Rule 4a
+    # Rule 1: Essential + Penalty + Grace = 0
+    if bill_type == 'essential' and penalty is True and grace == 0:
+        return (
+            'High', 'Non-deferrable', 'Rule 1',
+            'Essential bill with a late penalty and no grace period. '
+            'Must be settled within the current pay period.'
+        )
+
+    # Rule 2: Essential + Penalty + Grace > 0 + due in current period
+    if bill_type == 'essential' and penalty is True and grace > 0 and in_period:
+        return (
+            'High', 'Non-deferrable', 'Rule 2',
+            f'Essential bill with a {grace}-day grace period. '
+            f'The grace period only delays the penalty — it does not remove it.'
+        )
+
+    # Extension A: Essential + Penalty + Grace > 0 + due outside period
+    if bill_type == 'essential' and penalty is True and grace > 0 and not in_period:
+        return (
+            'Medium', 'Deferrable', 'Rule 2 (out of period)',
+            'Essential bill due outside the current pay period — '
+            'defer to the period when it is actually due.'
+        )
+
+    # Extension B: Essential + No penalty
+    if bill_type == 'essential' and penalty is False:
+        return (
+            'Medium', 'Deferrable', 'Rule 2 extension (no penalty)',
+            'Essential service without a late penalty — '
+            'deferrable only if budget requires it.'
+        )
+
+    # ==========================================================
+    # IMPORTANT (NON-ESSENTIAL) CATEGORY
+    # ==========================================================
+
+    # Rule 3: Important + Penalty + Grace > 0
+    if bill_type == 'important' and penalty is True and grace > 0:
+        return (
+            'Medium', 'Deferrable', 'Rule 3',
+            f'Non-essential but penalized. Has a {grace}-day grace period — '
+            f'safe to defer when budget is tight.'
+        )
+
+    # Extension C: Important + Penalty + Grace = 0
+    if bill_type == 'important' and penalty is True and grace == 0:
+        return (
+            'Medium', 'Deferrable', 'Rule 3 (no grace)',
+            'Non-essential service with a late penalty and no grace period. '
+            'Deferrable if budget is tight.'
+        )
+
+    # Extension D: Important + No penalty
+    if bill_type == 'important' and penalty is False:
+        return (
+            'Low', 'Deferrable', 'Rule 3 (no penalty)',
+            'Non-essential service with no late penalty — freely deferrable.'
+        )
+
+    # ==========================================================
+    # DISCRETIONARY CATEGORY
+    # ==========================================================
+
+    # Rule 4a: Discretionary + No penalty
     if bill_type == 'discretionary' and penalty is False:
-        return 'Low', 'Deferrable'
+        return (
+            'Low', 'Deferrable', 'Rule 4a',
+            'Discretionary expense with no penalty — freely deferrable to any future period.'
+        )
 
-    # Rule 4b
+    # Rule 4b: Discretionary + Penalty
     if bill_type == 'discretionary' and penalty is True:
-        return 'Medium', 'Deferrable'
+        return (
+            'Medium', 'Deferrable', 'Rule 4b',
+            f'Discretionary but penalized. Has a {grace}-day grace period — '
+            f'settle soon to avoid charges.'
+        )
 
-    return None, None
+    # Final fallback — should rarely be reached
+    return (
+        'Medium', 'Deferrable', 'Fallback',
+        'No specific rule matched. Conservative default applied.'
+    )
 
 
 @api_view(['POST'])
@@ -752,15 +763,17 @@ def prioritize_bills(request):
     unclassified_count = 0
 
     for bill in bills:
-        priority, classification = classify_bill(bill)
+        priority, classification, rule_id, reason = classify_bill(bill)
 
         bill.priority_level = priority
         bill.budget_classification = classification
+        bill.rule_applied = rule_id
 
         bill.save(
             update_fields=[
                 'priority_level',
-                'budget_classification'
+                'budget_classification',
+                'rule_applied'
             ]
         )
 
@@ -790,15 +803,9 @@ def prioritized_bills(request):
         'item__category'
     )
 
-    serializer = BudgetAllocationSerializer(
-        bills,
-        many=True
-    )
+    serializer = BudgetAllocationSerializer(bills, many=True)
 
-    return Response(
-        serializer.data,
-        status=status.HTTP_200_OK
-    )
+    return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 # ============================================================
@@ -813,12 +820,7 @@ def scan_bill(request):
 
     if 'image' not in request.FILES:
         return Response(
-            {
-                'error': (
-                    'No image file provided. '
-                    'Use form field "image".'
-                )
-            },
+            {'error': 'No image file provided. Use form field "image".'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -826,22 +828,13 @@ def scan_bill(request):
 
     if not image_file.content_type.startswith('image/'):
         return Response(
-            {
-                'error': (
-                    f'Invalid file type: '
-                    f'{image_file.content_type}'
-                )
-            },
+            {'error': f'Invalid file type: {image_file.content_type}'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if image_file.size > 10 * 1024 * 1024:
         return Response(
-            {
-                'error': (
-                    'Image too large. Maximum 10 MB.'
-                )
-            },
+            {'error': 'Image too large. Maximum 10 MB.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -854,20 +847,14 @@ def scan_bill(request):
         )
 
     return Response({
-        'message': (
-            'Image processed. '
-            'Please review the extracted fields.'
-        ),
+        'message': 'Image processed. Please review the extracted fields.',
         'extracted': {
             'amount': extracted['amount'],
             'due_date': extracted['due_date'],
             'merchant': extracted['merchant'],
         },
         'raw_text': extracted['raw_text'],
-        'note': (
-            'Nothing has been saved. Confirm via '
-            'POST /api/bills/<id>/confirm/ once verified.'
-        )
+        'note': 'Nothing has been saved. Confirm via POST /api/bills/<id>/confirm/ once verified.'
     }, status=status.HTTP_200_OK)
 
 
@@ -881,10 +868,7 @@ def _compute_risk_for_household(household):
     Used by assess_risk, get_recommendations, and list_notifications.
     """
 
-    # ---- 1. Combined income ----
-    incomes = Income.objects.filter(
-        earner__household=household
-    )
+    incomes = Income.objects.filter(earner__household=household)
 
     combined_income_min = Decimal('0')
     combined_income_max = Decimal('0')
@@ -892,17 +876,11 @@ def _compute_risk_for_household(household):
 
     for inc in incomes:
         lo, hi = _parse_range(inc.range_amount)
-
         combined_income_min += lo
         combined_income_max += hi
-
-        if inc.next_payday and (
-            next_payday is None
-            or inc.next_payday < next_payday
-        ):
+        if inc.next_payday and (next_payday is None or inc.next_payday < next_payday):
             next_payday = inc.next_payday
 
-    # ---- 2. Total bill allocations ----
     bills = BudgetAllocation.objects.filter(
         income__earner__household=household,
         is_confirmed=True,
@@ -912,37 +890,27 @@ def _compute_risk_for_household(household):
     alloc_max = Decimal('0')
 
     for b in bills:
-        lo, hi = _parse_range(
-            b.budget_amount_range
-        )
-
+        lo, hi = _parse_range(b.budget_amount_range)
         alloc_min += lo
         alloc_max += hi
 
-    # ---- 3. Days until next payday ----
-    days_until = compute_days_until_next_payday(
-        next_payday
-    )
+    days_until = compute_days_until_next_payday(next_payday)
 
-    # ---- 4. Compute risk ----
     result = assess_financial_risk(
         combined_income_min=combined_income_min,
         combined_income_max=combined_income_max,
         total_bill_allocations_min=alloc_min,
         total_bill_allocations_max=alloc_max,
         daily_expense_min=(
-            household.daily_food_expense_min
-            + household.daily_transport_expense_min
+            household.daily_food_expense_min + household.daily_transport_expense_min
         ),
         daily_expense_max=(
-            household.daily_food_expense_max
-            + household.daily_transport_expense_max
+            household.daily_food_expense_max + household.daily_transport_expense_max
         ),
         days_until_next_payday=days_until,
     )
 
     result['next_payday'] = next_payday
-
     return result
 
 
@@ -950,62 +918,41 @@ def _compute_risk_for_household(household):
 @permission_classes([IsAuthenticated])
 def assess_risk(request):
     """Compute financial risk using Chapter III's 3-step formula."""
-
-    result = _compute_risk_for_household(
-        request.user
-    )
-
-    return Response(
-        result,
-        status=status.HTTP_200_OK
-    )
+    result = _compute_risk_for_household(request.user)
+    return Response(result, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_recommendations(request):
     """Suggest deferrable bills when the household is At Risk or Critical."""
-
     household = request.user
 
-    # Use the shared helper — DO NOT call assess_risk(request) directly
-    risk_data = _compute_risk_for_household(
-        household
-    )
+    risk_data = _compute_risk_for_household(household)
 
     deferrable_bills = BudgetAllocation.objects.filter(
         income__earner__household=household,
         is_confirmed=True,
         budget_classification='Deferrable'
-    ).select_related(
-        'item',
-        'item__category'
-    )
+    ).select_related('item', 'item__category')
 
     deferred_list = []
     total_freed = Decimal('0')
 
     for b in deferrable_bills:
-        lo, hi = _parse_range(
-            b.budget_amount_range
-        )
-
+        lo, hi = _parse_range(b.budget_amount_range)
         total_freed += lo
 
         deferred_list.append({
             'budget_allocation_id': b.budget_allocation_id,
-            'item_desc': (
-                b.item.item_desc
-                if b.item
-                else None
-            ),
+            'item_desc': b.item.item_desc if b.item else None,
             'category_desc': (
                 b.item.category.category_desc
-                if b.item and b.item.category
-                else None
+                if b.item and b.item.category else None
             ),
             'priority_level': b.priority_level,
             'budget_classification': b.budget_classification,
+            'rule_applied': b.rule_applied,
             'amount_range': b.budget_amount_range,
             'actual_due_date': b.actual_due_date,
         })
@@ -1014,9 +961,7 @@ def get_recommendations(request):
         'risk_level': risk_data['risk_level'],
         'label': risk_data['label'],
         'color_indicator': risk_data['color_indicator'],
-        'activate_deferral': (
-            risk_data['label'] in ('AT RISK', 'CRITICAL')
-        ),
+        'activate_deferral': risk_data['label'] in ('AT RISK', 'CRITICAL'),
         'deferrable_bills': deferred_list,
         'estimated_budget_freed': str(total_freed),
         'message': (
@@ -1036,16 +981,12 @@ def get_recommendations(request):
 @permission_classes([IsAuthenticated])
 def budget_allocation_summary(request):
     """Return the household's budget allocation grouped by category."""
-
     household = request.user
 
     bills = BudgetAllocation.objects.filter(
         income__earner__household=household,
         is_confirmed=True,
-    ).select_related(
-        'item',
-        'item__category'
-    )
+    ).select_related('item', 'item__category')
 
     by_category = {}
     total_min = Decimal('0')
@@ -1055,13 +996,9 @@ def budget_allocation_summary(request):
     for b in bills:
         cat_name = (
             b.item.category.category_desc
-            if b.item and b.item.category
-            else 'Uncategorized'
+            if b.item and b.item.category else 'Uncategorized'
         )
-
-        lo, hi = _parse_range(
-            b.budget_amount_range
-        )
+        lo, hi = _parse_range(b.budget_amount_range)
 
         total_min += lo
         total_max += hi
@@ -1106,7 +1043,6 @@ def budget_allocation_summary(request):
 @permission_classes([IsAuthenticated])
 def list_notifications(request):
     """Return due date reminders and risk alerts for the household."""
-
     household = request.user
     today = date.today()
     alerts = []
@@ -1115,24 +1051,14 @@ def list_notifications(request):
         income__earner__household=household,
         is_confirmed=True,
         is_paid=False,
-    ).select_related(
-        'item',
-        'item__category'
-    )
+    ).select_related('item', 'item__category')
 
     for b in bills:
         if not b.actual_due_date:
             continue
 
-        days_until_due = (
-            b.actual_due_date - today
-        ).days
-
-        item_name = (
-            b.item.item_desc
-            if b.item
-            else 'Bill'
-        )
+        days_until_due = (b.actual_due_date - today).days
+        item_name = b.item.item_desc if b.item else 'Bill'
 
         if days_until_due < 0:
             alerts.append({
@@ -1151,20 +1077,9 @@ def list_notifications(request):
         elif days_until_due <= 3:
             alerts.append({
                 'type': 'due_soon',
-                'severity': (
-                    'high'
-                    if b.priority_level == 'High'
-                    else 'medium'
-                ),
-                'title': (
-                    f"{item_name} due in "
-                    f"{days_until_due} day(s)"
-                ),
-                'message': (
-                    f"Due {b.actual_due_date}. "
-                    f"Priority: "
-                    f"{b.priority_level or 'N/A'}."
-                ),
+                'severity': 'high' if b.priority_level == 'High' else 'medium',
+                'title': f"{item_name} due in {days_until_due} day(s)",
+                'message': f"Due {b.actual_due_date}. Priority: {b.priority_level or 'N/A'}.",
                 'bill_id': b.budget_allocation_id,
                 'due_date': b.actual_due_date,
             })
@@ -1173,58 +1088,28 @@ def list_notifications(request):
             alerts.append({
                 'type': 'upcoming',
                 'severity': 'low',
-                'title': (
-                    f"{item_name} due in "
-                    f"{days_until_due} day(s)"
-                ),
-                'message': (
-                    f"Due {b.actual_due_date}."
-                ),
+                'title': f"{item_name} due in {days_until_due} day(s)",
+                'message': f"Due {b.actual_due_date}.",
                 'bill_id': b.budget_allocation_id,
                 'due_date': b.actual_due_date,
             })
 
-    # Risk alert — use shared helper
-    risk_data = _compute_risk_for_household(
-        household
-    )
+    risk_data = _compute_risk_for_household(household)
 
-    if risk_data['label'] in (
-        'AT RISK',
-        'CRITICAL'
-    ):
+    if risk_data['label'] in ('AT RISK', 'CRITICAL'):
         alerts.insert(0, {
             'type': 'risk_alert',
-            'severity': (
-                'high'
-                if risk_data['label'] == 'CRITICAL'
-                else 'medium'
-            ),
-            'title': (
-                f"Financial status: "
-                f"{risk_data['label']}"
-            ),
+            'severity': 'high' if risk_data['label'] == 'CRITICAL' else 'medium',
+            'title': f"Financial status: {risk_data['label']}",
             'message': (
-                f"Remaining budget is "
-                f"{risk_data['remaining_budget_min']}. "
+                f"Remaining budget is {risk_data['remaining_budget_min']}. "
                 f"Consider deferring bills."
             ),
             'risk_level': risk_data['risk_level'],
         })
 
-    order = {
-        'critical': 0,
-        'high': 1,
-        'medium': 2,
-        'low': 3
-    }
-
-    alerts.sort(
-        key=lambda a: order.get(
-            a['severity'],
-            99
-        )
-    )
+    order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+    alerts.sort(key=lambda a: order.get(a['severity'], 99))
 
     return Response({
         'count': len(alerts),

@@ -218,6 +218,15 @@ class BudgetAllocation(models.Model):
         blank=True
     )
 
+    # ---- Rule engine output ----
+    # Which rule (Rule 1, Rule 2, Rule 3, Rule 4a, Rule 4b) classified this bill.
+    # Used by the frontend to display the exact reason text.
+    rule_applied = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True
+    )
+
     period_half = models.CharField(
         max_length=20,
         choices=PERIOD_CHOICES,
