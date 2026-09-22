@@ -19,6 +19,7 @@ class Household(models.Model):
     survival_threshold_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     last_login = models.DateTimeField(null=True, blank=True)
+    setup_completed = models.BooleanField(default=False)
 
     # ---- Required by DRF / SimpleJWT ----
 
@@ -136,15 +137,18 @@ class BudgetAllocation(models.Model):
         ('Medium', 'Medium'),
         ('Low', 'Low'),
     ]
+
     CLASSIFICATION_CHOICES = [
         ('Non-deferrable', 'Non-deferrable'),
         ('Deferrable', 'Deferrable'),
     ]
+
     RISK_CHOICES = [
         ('Stable', 'Stable'),
         ('At Risk', 'At Risk'),
         ('Critical', 'Critical'),
     ]
+
     PERIOD_CHOICES = [
         ('1st Half', '1st Half'),
         ('2nd Half', '2nd Half'),
@@ -152,48 +156,88 @@ class BudgetAllocation(models.Model):
     ]
 
     budget_allocation_id = models.AutoField(primary_key=True)
+
     income = models.ForeignKey(
         Income,
         on_delete=models.CASCADE,
         db_column='income_id'
     )
+
     item = models.ForeignKey(
         BudgetItem,
         on_delete=models.CASCADE,
         db_column='item_id'
     )
+
     amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         null=True,
         blank=True
     )
-    actual_due_date = models.DateField(null=True, blank=True)
-    image_path = models.CharField(max_length=500, null=True, blank=True)
-    scan_date = models.DateField(null=True, blank=True)
-    is_confirmed = models.BooleanField(default=False)
-    budget_amount_range = models.CharField(max_length=100)
+
+    actual_due_date = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    image_path = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True
+    )
+
+    scan_date = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    is_confirmed = models.BooleanField(
+        default=False
+    )
+
+    budget_amount_range = models.CharField(
+        max_length=100
+    )
+
     budget_start_date = models.DateField()
+
     budget_end_date = models.DateField()
+
     budget_classification = models.CharField(
         max_length=20,
         choices=CLASSIFICATION_CHOICES,
         null=True,
         blank=True
     )
+
     priority_level = models.CharField(
         max_length=10,
         choices=PRIORITY_CHOICES,
         null=True,
         blank=True
     )
+
     period_half = models.CharField(
         max_length=20,
         choices=PERIOD_CHOICES,
         null=True,
         blank=True
     )
-    bill_reminder = models.BooleanField(default=False)
+
+    bill_reminder = models.BooleanField(
+        default=False
+    )
+
+    # ---- Payment status ----
+    is_paid = models.BooleanField(
+        default=False
+    )
+
+    paid_date = models.DateField(
+        null=True,
+        blank=True
+    )
 
     class Meta:
         db_table = 'budget_allocation'
