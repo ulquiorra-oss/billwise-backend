@@ -3,11 +3,17 @@ OCR Bill Scanning Pipeline
 BillWise - Rule-Based Household Bill Prioritization and Financial Risk Assessment System
 """
 
+import io
 import os
 import re
 from datetime import datetime
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
+
+try:
+    import pymupdf as fitz  # PyMuPDF — renders PDF pages to images, no external Poppler needed
+except ImportError:  # pragma: no cover - only hit if the dependency is missing
+    fitz = None
 
 # ---- Tesseract path (Windows) ----
 if os.name == 'nt':
@@ -112,9 +118,37 @@ def extract_merchant(text):
     return None
 
 
-def scan_bill_image(file_obj):
-    """Full pipeline: preprocess → OCR → extract fields."""
-    image = Image.open(file_obj)
+def pdf_first_page_to_image(file_obj, dpi=200):
+    """
+    Render the first page of a PDF receipt into a PIL Image so it can go
+    through the same OCR pipeline as a photographed bill.
+    """
+    if fitz is None:
+        raise RuntimeError(
+            "PyMuPDF is required to scan PDF receipts. Install it with `pip install pymupdf`."
+        )
+
+    file_obj.seek(0)
+    doc = fitz.open(stream=file_obj.read(), filetype='pdf')
+    try:
+        if doc.page_count == 0:
+            raise ValueError('The PDF has no pages.')
+
+        page = doc.load_page(0)
+        zoom = dpi / 72  # PDF points are 72 per inch
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        return Image.open(io.BytesIO(pix.tobytes('png')))
+    finally:
+        doc.close()
+
+
+def scan_bill_image(file_obj, is_pdf=False):
+    """
+    Full pipeline: preprocess -> OCR -> extract fields.
+    Accepts a photographed bill (JPEG/PNG/etc.) or, when is_pdf=True,
+    a PDF receipt — the first page of the PDF is scanned.
+    """
+    image = pdf_first_page_to_image(file_obj) if is_pdf else Image.open(file_obj)
     processed = preprocess_image(image)
     raw_text = pytesseract.image_to_string(processed, lang='eng')
 

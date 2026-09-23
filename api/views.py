@@ -816,30 +816,32 @@ def prioritized_bills(request):
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def scan_bill(request):
-    """Upload a bill image → OCR extraction. Does NOT save to DB."""
+    """Upload a bill photo or PDF receipt → OCR extraction. Does NOT save to DB."""
 
     if 'image' not in request.FILES:
         return Response(
-            {'error': 'No image file provided. Use form field "image".'},
+            {'error': 'No file provided. Use form field "image".'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    image_file = request.FILES['image']
+    uploaded_file = request.FILES['image']
+    content_type = uploaded_file.content_type or ''
+    is_pdf = content_type == 'application/pdf' or uploaded_file.name.lower().endswith('.pdf')
 
-    if not image_file.content_type.startswith('image/'):
+    if not (content_type.startswith('image/') or is_pdf):
         return Response(
-            {'error': f'Invalid file type: {image_file.content_type}'},
+            {'error': f'Invalid file type: {content_type}. Upload a photo (JPEG/PNG) or a PDF receipt.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if image_file.size > 10 * 1024 * 1024:
+    if uploaded_file.size > 10 * 1024 * 1024:
         return Response(
-            {'error': 'Image too large. Maximum 10 MB.'},
+            {'error': 'File too large. Maximum 10 MB.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     try:
-        extracted = scan_bill_image(image_file)
+        extracted = scan_bill_image(uploaded_file, is_pdf=is_pdf)
     except Exception as e:
         return Response(
             {'error': f'OCR failed: {str(e)}'},
@@ -847,7 +849,7 @@ def scan_bill(request):
         )
 
     return Response({
-        'message': 'Image processed. Please review the extracted fields.',
+        'message': 'File processed. Please review the extracted fields.',
         'extracted': {
             'amount': extracted['amount'],
             'due_date': extracted['due_date'],
