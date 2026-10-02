@@ -31,6 +31,7 @@ from .models import (
     IncomeFrequency,
     ItemCategory,
 )
+from .payday import income_next_payday
 from .risk import _parse_range
 from .serializers import BudgetAllocationSerializer
 from .views import classify_bill
@@ -144,6 +145,7 @@ def get_default_income(household):
             range_amount='0',
             income_startdate=today,
             next_payday=_end_of_month(today),
+            payday_day_1=31,
         )
 
 
@@ -291,5 +293,5 @@ def monthly_income(request):
         'range_amount': income.range_amount,
         'min': str(lo),
         'max': str(hi),
-        'next_payday': income.next_payday,
+        'next_payday': income_next_payday(income),
     }, status=status.HTTP_200_OK)

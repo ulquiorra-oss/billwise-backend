@@ -9,7 +9,9 @@ class Household(models.Model):
     password = models.CharField(max_length=255)
     total_members = models.IntegerField(default=0)
     no_of_earners = models.IntegerField(default=0)
-    no_of_dependents = models.IntegerField(default=0)
+    no_of_dependents = models.IntegerField(default=0)  # = no_of_children + no_of_seniors
+    no_of_children = models.IntegerField(default=0)
+    no_of_seniors = models.IntegerField(default=0)
     housing_type = models.CharField(max_length=100, blank=True)
     daily_food_expense_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     daily_food_expense_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -91,7 +93,10 @@ class Income(models.Model):
     )
     range_amount = models.CharField(max_length=100)
     income_startdate = models.DateField()
-    next_payday = models.DateField()
+    next_payday = models.DateField()  # last computed value; the schedule below is the source of truth
+    payday_weekday = models.PositiveSmallIntegerField(null=True, blank=True)  # weekly: 0=Mon..6=Sun
+    payday_day_1 = models.PositiveSmallIntegerField(null=True, blank=True)  # monthly / twice a month (31 = end of month)
+    payday_day_2 = models.PositiveSmallIntegerField(null=True, blank=True)  # twice a month only
 
     class Meta:
         db_table = 'income'
@@ -111,6 +116,24 @@ class ItemCategory(models.Model):
         return self.category_desc
 
 
+class Biller(models.Model):
+    """A company the household pays. Holds the late-payment rules so users never have to enter them."""
+    biller_id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=100, unique=True)
+    category = models.CharField(max_length=100)  # an ItemCategory description, e.g. 'Electricity'
+    city = models.CharField(max_length=100, default='Cagayan de Oro')  # or 'Nationwide'
+    keywords = models.CharField(max_length=255, blank=True, default='')  # comma separated, used to detect it on a scanned bill
+    grace_period_days = models.IntegerField(default=0)
+    has_penalty = models.BooleanField(default=True)
+    rules_verified = models.BooleanField(default=False)  # True once the rules were checked on the biller's website
+
+    class Meta:
+        db_table = 'biller'
+
+    def __str__(self):
+        return self.name
+
+
 class BudgetItem(models.Model):
     item_id = models.AutoField(primary_key=True)
     category = models.ForeignKey(
@@ -123,6 +146,15 @@ class BudgetItem(models.Model):
     due_day = models.IntegerField()
     grace_period_days = models.IntegerField(default=0)
     penalty_classification = models.BooleanField(default=False)
+    biller = models.ForeignKey(
+        Biller,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column='biller_id'
+    )
+    reminder_day = models.PositiveSmallIntegerField(null=True, blank=True)  # "remind me every month on day N" (31 = end of month)
+    is_daily = models.BooleanField(default=False)  # amounts are per day; stored as a monthly equivalent (x30)
 
     class Meta:
         db_table = 'budget_item'

@@ -33,6 +33,7 @@ from .setup_views import (
     _parse_bills,
     _period_for,
 )
+from .payday import CANONICAL, ScheduleError, canonical_frequency, frequency_kind, income_next_payday, next_payday, parse_schedule
 from .views import classify_bill
 
 
@@ -71,6 +72,7 @@ def _default_income(earner):
         range_amount='0.00-0.00',
         income_startdate=today,
         next_payday=_due_in_month(today.year, today.month, 31),
+        payday_day_1=31,  # end of month until the user sets it in Edit income
     )
 
 
@@ -138,9 +140,12 @@ def current_setup(request):
             'first_name': e.earner_fname,
             'last_name': e.earner_lname,
             'income_id': inc.income_id if inc else None,
-            'frequency': inc.income_frequency.frequency_desc if inc and inc.income_frequency else 'Monthly',
+            'frequency': canonical_frequency(inc.income_frequency.frequency_desc) if inc and inc.income_frequency else 'Monthly',
             'range_amount': inc.range_amount if inc else '',
-            'next_payday': inc.next_payday if inc else None,
+            'payday_weekday': inc.payday_weekday if inc else None,
+            'payday_day_1': inc.payday_day_1 if inc else None,
+            'payday_day_2': inc.payday_day_2 if inc else None,
+            'next_payday': income_next_payday(inc) if inc else None,
         })
 
     bills = (
@@ -166,8 +171,8 @@ def update_household_setup(request):
 
     try:
         hh = data.get('household') or {}
-        total = _int(hh.get('total_members'), 'Total family members', 1)
-        dependents = _int(hh.get('no_of_dependents'), 'Number of dependents', 0)
+        children = _int(hh.get('no_of_children'), 'Number of children', 0)
+        seniors = _int(hh.get('no_of_seniors'), 'Number of senior citizens', 0)
         housing = hh.get('housing_type')
         if housing not in HOUSING_TYPES:
             raise SetupError('Choose a housing type')
@@ -213,8 +218,10 @@ def update_household_setup(request):
                     BudgetAllocation.objects.filter(income__earner=earner).update(income=target)
                     earner.delete()
 
-            household.total_members = total
-            household.no_of_dependents = dependents
+            household.no_of_children = children
+            household.no_of_seniors = seniors
+            household.no_of_dependents = children + seniors
+            household.total_members = len(kept) + children + seniors
             household.housing_type = housing
             household.no_of_earners = len(kept)
             household.save()
@@ -239,16 +246,22 @@ def update_income_setup(request):
         for i, e in enumerate(items, 1):
             frequency = str(e.get('frequency') or '').strip()
             if not frequency:
-                raise SetupError(f'Earner {i}: choose an income frequency')
+                raise SetupError(f'Earner {i}: choose how often you are paid')
+            kind = frequency_kind(frequency)
+            try:
+                schedule = parse_schedule(kind, e, f'Earner {i}')
+            except ScheduleError as exc:
+                raise SetupError(str(exc))
             parsed.append((
                 _int(e.get('earner_id'), 'earner_id', 1),
-                frequency,
+                CANONICAL[kind],
                 _range(e.get('range_amount'), f'Earner {i} income'),
-                _date(e.get('next_payday'), f'Earner {i} next payday'),
+                schedule,
+                next_payday(kind, *schedule),
             ))
 
         with transaction.atomic():
-            for earner_id, frequency, rng, payday in parsed:
+            for earner_id, frequency, rng, schedule, payday in parsed:
                 earner = Earner.objects.filter(earner_id=earner_id, household=household).first()
                 if earner is None:
                     raise SetupError('One of the earners was not found')
@@ -256,6 +269,7 @@ def update_income_setup(request):
                 income.income_frequency = _frequency(frequency)
                 income.range_amount = rng
                 income.next_payday = payday
+                income.payday_weekday, income.payday_day_1, income.payday_day_2 = schedule
                 income.save()
     except SetupError as exc:
         return _bad(str(exc))
@@ -310,6 +324,9 @@ def _create_bill(income, b, today):
         due_day=b['due_day'],
         grace_period_days=b['grace'],
         penalty_classification=b['penalty'],
+        biller=b['biller'],
+        reminder_day=b['reminder'],
+        is_daily=b['is_daily'],
     )
     due = b['due_date'] or _next_due_date(b['due_day'], today)
     half, start, end = _period_for(due)
@@ -377,6 +394,9 @@ def setup_bill_detail(request, allocation_id):
         item.due_day = b['due_day']
         item.grace_period_days = b['grace']
         item.penalty_classification = b['penalty']
+        item.biller = b['biller']
+        item.reminder_day = b['reminder']
+        item.is_daily = b['is_daily']
         item.save()
 
         bill.budget_amount_range = f"{b['min']}-{b['max']}"

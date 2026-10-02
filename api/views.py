@@ -9,6 +9,8 @@ from rest_framework import status
 
 from .ocr import scan_bill_image
 from .risk import assess_financial_risk, compute_days_until_next_payday, _parse_range
+from .payday import income_next_payday
+from .biller_views import biller_json, detect_biller
 
 from .models import (
     Household,
@@ -848,12 +850,16 @@ def scan_bill(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+    # A recognised biller (e.g. CEPALCO) names the bill and brings its own grace/penalty rules.
+    biller = detect_biller(extracted['raw_text'])
+
     return Response({
         'message': 'File processed. Please review the extracted fields.',
         'extracted': {
             'amount': extracted['amount'],
             'due_date': extracted['due_date'],
-            'merchant': extracted['merchant'],
+            'merchant': biller.name if biller else extracted['merchant'],
+            'biller': biller_json(biller) if biller else None,
         },
         'raw_text': extracted['raw_text'],
         'note': 'Nothing has been saved. Confirm via POST /api/bills/<id>/confirm/ once verified.'
@@ -870,7 +876,7 @@ def _compute_risk_for_household(household):
     Used by assess_risk, get_recommendations, and list_notifications.
     """
 
-    incomes = Income.objects.filter(earner__household=household)
+    incomes = Income.objects.filter(earner__household=household).select_related('income_frequency')
 
     combined_income_min = Decimal('0')
     combined_income_max = Decimal('0')
@@ -880,8 +886,9 @@ def _compute_risk_for_household(household):
         lo, hi = _parse_range(inc.range_amount)
         combined_income_min += lo
         combined_income_max += hi
-        if inc.next_payday and (next_payday is None or inc.next_payday < next_payday):
-            next_payday = inc.next_payday
+        inc_payday = income_next_payday(inc)  # computed from the payday schedule, so it never goes stale
+        if inc_payday and (next_payday is None or inc_payday < next_payday):
+            next_payday = inc_payday
 
     bills = BudgetAllocation.objects.filter(
         income__earner__household=household,

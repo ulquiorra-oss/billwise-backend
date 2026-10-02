@@ -15,8 +15,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import BudgetAllocation, BudgetItem, Earner, Income, IncomeFrequency, ItemCategory
+from .models import Biller, BudgetAllocation, BudgetItem, Earner, Income, IncomeFrequency, ItemCategory
+from .payday import CANONICAL, ScheduleError, frequency_kind, next_payday, parse_schedule
 from .serializers import HouseholdSerializer
+
+DAYS_PER_MONTH = 30  # a daily cost counts as 30 days when converted to a monthly amount
 
 HOUSING_TYPES = {'Own House', 'Renting', 'With Relatives'}
 MAX_AMOUNT = Decimal('100000000')  # DecimalField(max_digits=10, decimal_places=2)
@@ -95,14 +98,22 @@ def _parse_earners(items):
 
         frequency = str(e.get('frequency') or '').strip()
         if not frequency:
-            raise SetupError(f'Earner {i}: choose an income frequency')
+            raise SetupError(f'Earner {i}: choose how often you are paid')
+        kind = frequency_kind(frequency)
+        try:
+            weekday, day1, day2 = parse_schedule(kind, e, f'Earner {i}')
+        except ScheduleError as exc:
+            raise SetupError(str(exc))
 
         earners.append({
             'first': first,
             'last': last,
             'range': f'{lo}-{hi}',
-            'frequency': frequency,
-            'payday': _date(e.get('next_payday'), f'Earner {i} next payday'),
+            'frequency': CANONICAL[kind],
+            'weekday': weekday,
+            'day1': day1,
+            'day2': day2,
+            'payday': next_payday(kind, weekday, day1, day2),
         })
     return earners
 
@@ -121,16 +132,51 @@ def _parse_bills(items):
         if lo > hi:
             raise SetupError(f"{name}: the minimum can't be higher than the maximum")
 
+        is_daily = bool(b.get('is_daily'))
+        if is_daily:
+            # entered per day; stored as a monthly equivalent so every total in the app stays consistent
+            lo, hi = lo * DAYS_PER_MONTH, hi * DAYS_PER_MONTH
+
         due_date = _date(b['due_date'], f'{name} due date') if b.get('due_date') else None
         amount = _num(b['amount'], f'{name} amount') if b.get('amount') not in (None, '') else None
+
+        reminder = None
+        if b.get('reminder_day') not in (None, ''):
+            reminder = _int(b.get('reminder_day'), f'{name} reminder day', 1, 31)
+
+        # Enrollment doesn't ask for a due date. A scanned bill brings one; otherwise the reminder day
+        # is used as the bill's day of the month (daily costs have no day, so they use the 1st).
+        if due_date:
+            due_day = due_date.day
+        elif b.get('due_day') not in (None, ''):
+            due_day = _int(b.get('due_day'), f'{name} due day', 1, 31)
+        elif reminder is not None:
+            due_day = reminder
+        elif is_daily:
+            due_day = 1
+        else:
+            raise SetupError(f'{name}: choose which day of the month to be reminded')
+
+        # The biller supplies the grace period and penalty rule; the user is never asked.
+        biller = None
+        if b.get('biller_id') not in (None, ''):
+            biller = Biller.objects.filter(biller_id=_int(b.get('biller_id'), f'{name} biller', 1)).first()
+        if biller is not None:
+            grace, penalty = biller.grace_period_days, biller.has_penalty
+        else:
+            grace = _int(b.get('grace_period_days', 0), f'{name} grace period', 0, 365)
+            penalty = bool(b.get('penalty_classification'))
 
         bills.append({
             'name': name[:255],
             'category': str(b.get('category') or 'Other').strip() or 'Other',
-            'due_day': due_date.day if due_date else _int(b.get('due_day'), f'{name} due day', 1, 31),
+            'due_day': due_day,
             'due_date': due_date,
-            'grace': _int(b.get('grace_period_days', 0), f'{name} grace period', 0, 365),
-            'penalty': bool(b.get('penalty_classification')),
+            'grace': grace,
+            'penalty': penalty,
+            'biller': biller,
+            'reminder': reminder,
+            'is_daily': is_daily,
             'amount': amount,
             'min': lo,
             'max': hi,
@@ -151,8 +197,8 @@ def submit_setup(request):
     data = request.data
     try:
         hh = data.get('household') or {}
-        total_members = _int(hh.get('total_members'), 'Total family members', 1)
-        dependents = _int(hh.get('no_of_dependents'), 'Number of dependents', 0)
+        children = _int(hh.get('no_of_children'), 'Number of children', 0)
+        seniors = _int(hh.get('no_of_seniors'), 'Number of senior citizens', 0)
         housing = hh.get('housing_type')
         if housing not in HOUSING_TYPES:
             raise SetupError('Choose a housing type')
@@ -171,9 +217,12 @@ def submit_setup(request):
         # are leftovers from testing. Start clean (cascades to income + bills).
         Earner.objects.filter(household=household).delete()
 
-        household.total_members = total_members
+        # total members is derived: every earner + every dependent
         household.no_of_earners = len(earners)
-        household.no_of_dependents = dependents
+        household.no_of_children = children
+        household.no_of_seniors = seniors
+        household.no_of_dependents = children + seniors
+        household.total_members = len(earners) + children + seniors
         household.housing_type = housing
         household.daily_food_expense_min = daily_food
         household.daily_food_expense_max = daily_food
@@ -197,6 +246,9 @@ def submit_setup(request):
                 range_amount=e['range'],
                 income_startdate=today,
                 next_payday=e['payday'],
+                payday_weekday=e['weekday'],
+                payday_day_1=e['day1'],
+                payday_day_2=e['day2'],
             ))
 
         # Every allocation needs an Income; bills are attached to the first earner's income.
@@ -214,6 +266,9 @@ def submit_setup(request):
                 due_day=b['due_day'],
                 grace_period_days=b['grace'],
                 penalty_classification=b['penalty'],
+                biller=b['biller'],
+                reminder_day=b['reminder'],
+                is_daily=b['is_daily'],
             )
             due = b['due_date'] or _next_due_date(b['due_day'], today)
             period_half, start, end = _period_for(due)

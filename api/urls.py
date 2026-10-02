@@ -4,6 +4,7 @@ from . import views
 from . import app_views
 from . import setup_views
 from . import edit_views
+from . import biller_views
 
 
 urlpatterns = [
@@ -187,6 +188,7 @@ urlpatterns = [
         name='list-notifications',
     ),
 
+    path('billers/', biller_views.list_billers, name='billers'),
     path('setup/current/', edit_views.current_setup, name='setup-current'),
     path('setup/household/', edit_views.update_household_setup, name='setup-household'),
     path('setup/income/', edit_views.update_income_setup, name='setup-income'),

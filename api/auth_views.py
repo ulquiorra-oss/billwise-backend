@@ -259,6 +259,8 @@ def get_profile(request):
             'total_members': household.total_members,
             'no_of_earners': household.no_of_earners,
             'no_of_dependents': household.no_of_dependents,
+            'no_of_children': household.no_of_children,
+            'no_of_seniors': household.no_of_seniors,
             'housing_type': household.housing_type,
         }, status=status.HTTP_200_OK)
     except Exception as e:

@@ -26,6 +26,8 @@ class HouseholdSerializer(serializers.ModelSerializer):
             'total_members',
             'no_of_earners',
             'no_of_dependents',
+            'no_of_children',
+            'no_of_seniors',
             'housing_type',
             'daily_food_expense_min',
             'daily_food_expense_max',
@@ -207,6 +209,10 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
         read_only=True,
     )
 
+    biller_id = serializers.IntegerField(source='item.biller_id', read_only=True)
+    reminder_day = serializers.IntegerField(source='item.reminder_day', read_only=True)
+    is_daily = serializers.BooleanField(source='item.is_daily', read_only=True)
+
     class Meta:
         model = BudgetAllocation
 
@@ -221,6 +227,9 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'grace_period_days',
             'penalty_classification',
             'due_day',
+            'biller_id',
+            'reminder_day',
+            'is_daily',
 
             'amount',
             'actual_due_date',
@@ -249,6 +258,9 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'grace_period_days',
             'penalty_classification',
             'due_day',
+            'biller_id',
+            'reminder_day',
+            'is_daily',
 
             # Automatically set when the bill is marked as paid
             'paid_date',
