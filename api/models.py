@@ -13,6 +13,7 @@ class Household(models.Model):
     no_of_children = models.IntegerField(default=0)
     no_of_seniors = models.IntegerField(default=0)
     housing_type = models.CharField(max_length=100, blank=True)
+    location = models.CharField(max_length=100, default='Cagayan de Oro')
     daily_food_expense_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     daily_food_expense_max = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     daily_transport_expense_min = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -143,7 +144,7 @@ class BudgetItem(models.Model):
         db_column='category_id'
     )
     item_desc = models.CharField(max_length=255)
-    due_day = models.IntegerField()
+    due_day = models.IntegerField(null=True, blank=True)
     grace_period_days = models.IntegerField(default=0)
     penalty_classification = models.BooleanField(default=False)
     biller = models.ForeignKey(
@@ -232,9 +233,8 @@ class BudgetAllocation(models.Model):
         max_length=100
     )
 
-    budget_start_date = models.DateField()
-
-    budget_end_date = models.DateField()
+    budget_start_date = models.DateField(null=True, blank=True)
+    budget_end_date = models.DateField(null=True, blank=True)
 
     budget_classification = models.CharField(
         max_length=20,
