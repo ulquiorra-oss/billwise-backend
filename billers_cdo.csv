@@ -1,0 +1,13 @@
+name,category,city,keywords,grace_period_days,has_penalty,rules_verified
+CEPALCO,Electricity,Cagayan de Oro,"cepalco,cagayan electric power",,,
+COWD,Water,Cagayan de Oro,"cowd,cagayan de oro water district,cagayan de oro city water district",,,
+Converge,Internet,Nationwide,"converge,convergeict",,,
+PLDT Home,Internet,Nationwide,pldt,,,
+Globe at Home,Internet,Nationwide,"globe at home,innove",,,
+Globe Postpaid,Phone,Nationwide,"globe postpaid,globe telecom",,,
+Smart Postpaid,Phone,Nationwide,"smart postpaid,smart communications",,,
+PhilHealth,Insurance,Nationwide,philhealth,,,
+Sun Life,Insurance,Nationwide,sun life,,,
+Home Credit,Loan,Nationwide,home credit,,,
+Netflix,Subscription,Nationwide,netflix,,,
+Spotify,Subscription,Nationwide,spotify,,,

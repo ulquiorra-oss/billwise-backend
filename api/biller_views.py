@@ -15,33 +15,15 @@ from .models import Biller
 # BillWise currently serves households in Cagayan de Oro.
 SERVICE_CITY = 'Cagayan de Oro'
 
-# grace_period_days / has_penalty are the defaults used until someone confirms the real rules on
-# the biller's website and sets rules_verified = True. Nothing here is a confirmed rule.
+# The priority billers for Cagayan de Oro. Every other biller lives in billers_cdo.csv; load it with
+#   python manage.py import_billers billers_cdo.csv
+# grace_period_days / has_penalty here are placeholders until someone confirms the real rules on the
+# biller's website and sets rules_verified = True (Django admin: /admin/). Nothing here is a confirmed rule.
 DEFAULT_BILLERS = [
     {'name': 'CEPALCO', 'category': 'Electricity', 'city': SERVICE_CITY,
      'keywords': 'cepalco,cagayan electric power'},
     {'name': 'COWD', 'category': 'Water', 'city': SERVICE_CITY,
-     'keywords': 'cowd,cagayan de oro water district,water district'},
-    {'name': 'Converge', 'category': 'Internet', 'city': 'Nationwide',
-     'keywords': 'converge,convergeict'},
-    {'name': 'PLDT Home', 'category': 'Internet', 'city': 'Nationwide',
-     'keywords': 'pldt'},
-    {'name': 'Globe at Home', 'category': 'Internet', 'city': 'Nationwide',
-     'keywords': 'globe at home,innove'},
-    {'name': 'Globe Postpaid', 'category': 'Phone', 'city': 'Nationwide',
-     'keywords': 'globe postpaid,globe telecom'},
-    {'name': 'Smart Postpaid', 'category': 'Phone', 'city': 'Nationwide',
-     'keywords': 'smart postpaid,smart communications'},
-    {'name': 'PhilHealth', 'category': 'Insurance', 'city': 'Nationwide',
-     'keywords': 'philhealth'},
-    {'name': 'Sun Life', 'category': 'Insurance', 'city': 'Nationwide',
-     'keywords': 'sun life'},
-    {'name': 'Home Credit', 'category': 'Loan', 'city': 'Nationwide',
-     'keywords': 'home credit'},
-    {'name': 'Netflix', 'category': 'Subscription', 'city': 'Nationwide',
-     'keywords': 'netflix'},
-    {'name': 'Spotify', 'category': 'Subscription', 'city': 'Nationwide',
-     'keywords': 'spotify'},
+     'keywords': 'cowd,cagayan de oro water district,cagayan de oro city water district'},
 ]
 
 
