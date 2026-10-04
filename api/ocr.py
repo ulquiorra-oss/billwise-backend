@@ -1,6 +1,10 @@
 """
 OCR Bill Scanning Pipeline
 BillWise - Rule-Based Household Bill Prioritization and Financial Risk Assessment System
+
+Supports:
+  - Images (JPEG, PNG, WEBP, HEIC, BMP, TIFF)
+  - PDFs (first page is rendered via PyMuPDF — no Poppler needed)
 """
 
 import io
@@ -12,8 +16,9 @@ import pytesseract
 
 try:
     import pymupdf as fitz  # PyMuPDF — renders PDF pages to images, no external Poppler needed
-except ImportError:  # pragma: no cover - only hit if the dependency is missing
+except ImportError:  # pragma: no cover
     fitz = None
+
 
 # ---- Tesseract path (Windows) ----
 if os.name == 'nt':
@@ -27,6 +32,10 @@ if os.name == 'nt':
             pytesseract.pytesseract.tesseract_cmd = path
             break
 
+
+# ============================================================
+# IMAGE PREPROCESSING
+# ============================================================
 
 def preprocess_image(image):
     """Grayscale, upscale small images, boost contrast, sharpen."""
@@ -42,8 +51,13 @@ def preprocess_image(image):
     return image
 
 
+# ============================================================
+# EXTRACTION PATTERNS
+# ============================================================
+
+# Matches: ₱1,234.56 | PHP 1,234.56 | 1,234.56 | P 1234.56 | $1,234.56
 AMOUNT_PATTERN = re.compile(
-    r'(?:₱|PHP|P|Php|php)\s*([0-9]{1,3}(?:[,\s][0-9]{3})*(?:\.[0-9]{2})?)'
+    r'(?:₱|PHP|P|Php|php|\$|USD)\s*([0-9]{1,3}(?:[,\s][0-9]{3})*(?:\.[0-9]{2})?)'
     r'|(?<![0-9])([0-9]{1,3}(?:,[0-9]{3})+\.[0-9]{2})(?![0-9])',
     re.IGNORECASE
 )
@@ -59,21 +73,42 @@ MONTH_MAP = {
     'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
 }
 
+# Words that are almost never a real merchant name — used to skip past them
+GENERIC_HEADERS = {
+    'receipt', 'invoice', 'statement', 'bill', 'official',
+    'summary', 'notice', 'tax', 'billing',
+}
+
+# Words that strongly suggest a merchant/company name
+COMPANY_HINTS = (
+    'corporation', 'corp', 'inc', 'inc.', 'company', 'co.', 'co',
+    'ltd', 'llc', 'enterprise', 'holdings', 'group',
+    'meralco', 'maynilad', 'pldt', 'globe', 'converge', 'cepalco',
+    'moresco', 'smart', 'manila water', 'metro', 'electric', 'water',
+)
+
+
+# ============================================================
+# FIELD EXTRACTORS
+# ============================================================
 
 def extract_amount(text):
+    """Return the largest currency-like value found in the text."""
     amounts = []
     for match in AMOUNT_PATTERN.finditer(text):
         raw = match.group(1) or match.group(2)
         if not raw:
             continue
         try:
-            amounts.append(float(raw.replace(',', '').replace(' ', '')))
+            cleaned = raw.replace(',', '').replace(' ', '')
+            amounts.append(float(cleaned))
         except ValueError:
             continue
     return max(amounts) if amounts else None
 
 
 def extract_due_date(text):
+    """Return the earliest future date found, else the earliest overall, as YYYY-MM-DD."""
     candidates = []
 
     for match in DATE_PATTERNS[0].finditer(text):
@@ -110,18 +145,48 @@ def extract_due_date(text):
 
 
 def extract_merchant(text):
+    """
+    Try to identify the biller/merchant name.
+
+    Strategy:
+      1. Prefer lines that look like a company name ("Meralco", "PLDT Inc", etc.)
+      2. Otherwise, take the first alphabetic line that isn't a generic header
+         ("Receipt", "Invoice", "Statement", ...).
+    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    for line in lines[:10]:
-        alpha_count = sum(c.isalpha() for c in line)
-        if alpha_count >= 3 and len(line) <= 60:
+    if not lines:
+        return None
+
+    # 1. Company-name hints first
+    for line in lines[:15]:
+        lower = line.lower()
+        if any(hint in lower for hint in COMPANY_HINTS) and len(line) <= 80:
             return line
+
+    # 2. First non-generic line
+    for line in lines[:10]:
+        lower = line.lower().rstrip(':').strip()
+        alpha_count = sum(c.isalpha() for c in line)
+        if alpha_count < 3 or len(line) > 60:
+            continue
+        # Skip "Receipt", "Invoice", etc. (or "Receipt No. XXXX")
+        if lower in GENERIC_HEADERS:
+            continue
+        if any(lower.startswith(h) for h in GENERIC_HEADERS):
+            continue
+        return line
+
     return None
 
 
+# ============================================================
+# PDF HANDLING
+# ============================================================
+
 def pdf_first_page_to_image(file_obj, dpi=200):
     """
-    Render the first page of a PDF receipt into a PIL Image so it can go
-    through the same OCR pipeline as a photographed bill.
+    Render the first page of a PDF into a PIL Image so it can go through
+    the same OCR pipeline as a photographed bill.
     """
     if fitz is None:
         raise RuntimeError(
@@ -142,11 +207,19 @@ def pdf_first_page_to_image(file_obj, dpi=200):
         doc.close()
 
 
+# ============================================================
+# MAIN ENTRY POINT
+# ============================================================
+
 def scan_bill_image(file_obj, is_pdf=False):
     """
     Full pipeline: preprocess -> OCR -> extract fields.
+
     Accepts a photographed bill (JPEG/PNG/etc.) or, when is_pdf=True,
     a PDF receipt — the first page of the PDF is scanned.
+
+    Returns:
+        dict with keys: amount, due_date, merchant, raw_text
     """
     image = pdf_first_page_to_image(file_obj) if is_pdf else Image.open(file_obj)
     processed = preprocess_image(image)

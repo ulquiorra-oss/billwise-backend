@@ -633,7 +633,6 @@ def classify_bill(bill):
         bill_type = 'important'
     elif category_desc in discretionary_categories:
         bill_type = 'discretionary'
-    # Fallback: match by item_desc keywords
     elif any(kw in item_desc for kw in ['electricity', 'water', 'rent', 'loan', 'gas']):
         bill_type = 'essential'
     elif any(kw in item_desc for kw in ['internet', 'subscription', 'subscribe',
@@ -662,7 +661,6 @@ def classify_bill(bill):
     # ESSENTIAL CATEGORY
     # ==========================================================
 
-    # Rule 1: Essential + Penalty + Grace = 0
     if bill_type == 'essential' and penalty is True and grace == 0:
         return (
             'High', 'Non-deferrable', 'Rule 1',
@@ -670,7 +668,6 @@ def classify_bill(bill):
             'Must be settled within the current pay period.'
         )
 
-    # Rule 2: Essential + Penalty + Grace > 0 + due in current period
     if bill_type == 'essential' and penalty is True and grace > 0 and in_period:
         return (
             'High', 'Non-deferrable', 'Rule 2',
@@ -678,7 +675,6 @@ def classify_bill(bill):
             f'The grace period only delays the penalty — it does not remove it.'
         )
 
-    # Extension A: Essential + Penalty + Grace > 0 + due outside period
     if bill_type == 'essential' and penalty is True and grace > 0 and not in_period:
         return (
             'Medium', 'Deferrable', 'Rule 2 (out of period)',
@@ -686,7 +682,6 @@ def classify_bill(bill):
             'defer to the period when it is actually due.'
         )
 
-    # Extension B: Essential + No penalty
     if bill_type == 'essential' and penalty is False:
         return (
             'Medium', 'Deferrable', 'Rule 2 extension (no penalty)',
@@ -698,7 +693,6 @@ def classify_bill(bill):
     # IMPORTANT (NON-ESSENTIAL) CATEGORY
     # ==========================================================
 
-    # Rule 3: Important + Penalty + Grace > 0
     if bill_type == 'important' and penalty is True and grace > 0:
         return (
             'Medium', 'Deferrable', 'Rule 3',
@@ -706,7 +700,6 @@ def classify_bill(bill):
             f'safe to defer when budget is tight.'
         )
 
-    # Extension C: Important + Penalty + Grace = 0
     if bill_type == 'important' and penalty is True and grace == 0:
         return (
             'Medium', 'Deferrable', 'Rule 3 (no grace)',
@@ -714,7 +707,6 @@ def classify_bill(bill):
             'Deferrable if budget is tight.'
         )
 
-    # Extension D: Important + No penalty
     if bill_type == 'important' and penalty is False:
         return (
             'Low', 'Deferrable', 'Rule 3 (no penalty)',
@@ -725,14 +717,12 @@ def classify_bill(bill):
     # DISCRETIONARY CATEGORY
     # ==========================================================
 
-    # Rule 4a: Discretionary + No penalty
     if bill_type == 'discretionary' and penalty is False:
         return (
             'Low', 'Deferrable', 'Rule 4a',
             'Discretionary expense with no penalty — freely deferrable to any future period.'
         )
 
-    # Rule 4b: Discretionary + Penalty
     if bill_type == 'discretionary' and penalty is True:
         return (
             'Medium', 'Deferrable', 'Rule 4b',
@@ -740,7 +730,6 @@ def classify_bill(bill):
             f'settle soon to avoid charges.'
         )
 
-    # Final fallback — should rarely be reached
     return (
         'Medium', 'Deferrable', 'Fallback',
         'No specific rule matched. Conservative default applied.'
@@ -828,17 +817,22 @@ def scan_bill(request):
 
     uploaded_file = request.FILES['image']
     content_type = uploaded_file.content_type or ''
-    is_pdf = content_type == 'application/pdf' or uploaded_file.name.lower().endswith('.pdf')
+    filename = (uploaded_file.name or '').lower()
 
-    if not (content_type.startswith('image/') or is_pdf):
+    is_pdf = content_type == 'application/pdf' or filename.endswith('.pdf')
+    is_image = content_type.startswith('image/')
+
+    if not (is_pdf or is_image):
         return Response(
             {'error': f'Invalid file type: {content_type}. Upload a photo (JPEG/PNG) or a PDF receipt.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    if uploaded_file.size > 10 * 1024 * 1024:
+    # PDFs tend to be larger than photos
+    max_size = 15 * 1024 * 1024 if is_pdf else 10 * 1024 * 1024
+    if uploaded_file.size > max_size:
         return Response(
-            {'error': 'File too large. Maximum 10 MB.'},
+            {'error': f'File too large. Maximum {max_size // (1024 * 1024)} MB.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -855,6 +849,7 @@ def scan_bill(request):
 
     return Response({
         'message': 'File processed. Please review the extracted fields.',
+        'source_type': 'pdf' if is_pdf else 'image',
         'extracted': {
             'amount': extracted['amount'],
             'due_date': extracted['due_date'],
@@ -886,7 +881,7 @@ def _compute_risk_for_household(household):
         lo, hi = _parse_range(inc.range_amount)
         combined_income_min += lo
         combined_income_max += hi
-        inc_payday = income_next_payday(inc)  # computed from the payday schedule, so it never goes stale
+        inc_payday = income_next_payday(inc)
         if inc_payday and (next_payday is None or inc_payday < next_payday):
             next_payday = inc_payday
 
