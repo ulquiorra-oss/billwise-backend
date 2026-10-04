@@ -189,6 +189,9 @@ urlpatterns = [
     ),
 
     path('billers/', biller_views.list_billers, name='billers'),
+    path('bills/<int:allocation_id>/pay/', app_views.pay_bill, name='bill-pay'),
+    path('bills/<int:allocation_id>/defer/', app_views.defer_bill, name='bill-defer'),
+    path('bills/preview-priority/', app_views.preview_priority, name='bill-preview-priority'),
     path('setup/current/', edit_views.current_setup, name='setup-current'),
     path('setup/household/', edit_views.update_household_setup, name='setup-household'),
     path('setup/income/', edit_views.update_income_setup, name='setup-income'),

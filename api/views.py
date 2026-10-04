@@ -894,6 +894,8 @@ def _compute_risk_for_household(household):
     alloc_max = Decimal('0')
 
     for b in bills:
+        if b.deferred_until and b.deferred_until >= date.today():
+            continue  # planned for after payday; counts again once that payday has passed
         lo, hi = _parse_range(b.budget_amount_range)
         alloc_min += lo
         alloc_max += hi
