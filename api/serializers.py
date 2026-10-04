@@ -1,3 +1,4 @@
+from datetime import date
 from rest_framework import serializers
 
 from .models import (
@@ -6,7 +7,6 @@ from .models import (
     Income,
     IncomeFrequency,
     ItemCategory,
-    Biller,
     BudgetItem,
     BudgetAllocation,
 )
@@ -30,7 +30,6 @@ class HouseholdSerializer(serializers.ModelSerializer):
             'no_of_children',
             'no_of_seniors',
             'housing_type',
-            'location',
             'daily_food_expense_min',
             'daily_food_expense_max',
             'daily_transport_expense_min',
@@ -44,6 +43,7 @@ class HouseholdSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'household_id',
             'email',
+            'setup_completed',
             'created_at',
             'last_login',
         ]
@@ -104,9 +104,6 @@ class IncomeSerializer(serializers.ModelSerializer):
             'range_amount',
             'income_startdate',
             'next_payday',
-            'payday_weekday',
-            'payday_day_1',
-            'payday_day_2',
         ]
         read_only_fields = [
             'income_id',
@@ -123,34 +120,6 @@ class IncomeSerializer(serializers.ModelSerializer):
             if obj.income_frequency
             else None
         )
-
-    def validate_payday_weekday(self, value):
-        """0=Mon .. 6=Sun, or null."""
-        if value is None:
-            return value
-        if value < 0 or value > 6:
-            raise serializers.ValidationError(
-                'payday_weekday must be between 0 (Mon) and 6 (Sun).'
-            )
-        return value
-
-    def validate_payday_day_1(self, value):
-        if value is None:
-            return value
-        if value < 1 or value > 31:
-            raise serializers.ValidationError(
-                'payday_day_1 must be between 1 and 31 (31 = end of month).'
-            )
-        return value
-
-    def validate_payday_day_2(self, value):
-        if value is None:
-            return value
-        if value < 1 or value > 31:
-            raise serializers.ValidationError(
-                'payday_day_2 must be between 1 and 31 (31 = end of month).'
-            )
-        return value
 
 
 # ============================================================
@@ -170,38 +139,12 @@ class ItemCategorySerializer(serializers.ModelSerializer):
 
 
 # ============================================================
-# BILLER
-# ============================================================
-
-class BillerSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Biller
-        fields = [
-            'biller_id',
-            'name',
-            'category',
-            'city',
-            'keywords',
-            'grace_period_days',
-            'has_penalty',
-            'rules_verified',
-        ]
-        read_only_fields = [
-            'biller_id',
-        ]
-
-
-# ============================================================
 # BUDGET ITEM
 # ============================================================
 
 class BudgetItemSerializer(serializers.ModelSerializer):
     category_desc = serializers.CharField(
         source='category.category_desc',
-        read_only=True,
-    )
-    biller_name = serializers.CharField(
-        source='biller.name',
         read_only=True,
     )
 
@@ -215,21 +158,13 @@ class BudgetItemSerializer(serializers.ModelSerializer):
             'due_day',
             'grace_period_days',
             'penalty_classification',
-            'biller',
-            'biller_name',
-            'reminder_day',
-            'is_daily',
         ]
         read_only_fields = [
             'item_id',
             'category_desc',
-            'biller_name',
         ]
 
     def validate_due_day(self, value):
-        # due_day is nullable now — skip validation when None
-        if value is None:
-            return value
         if value < 1 or value > 31:
             raise serializers.ValidationError(
                 'due_day must be between 1 and 31.'
@@ -240,15 +175,6 @@ class BudgetItemSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError(
                 'grace_period_days cannot be negative.'
-            )
-        return value
-
-    def validate_reminder_day(self, value):
-        if value is None:
-            return value
-        if value < 1 or value > 31:
-            raise serializers.ValidationError(
-                'reminder_day must be between 1 and 31 (31 = end of month).'
             )
         return value
 
@@ -284,20 +210,14 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
         read_only=True,
     )
 
-    biller_id = serializers.IntegerField(
-        source='item.biller_id',
-        read_only=True,
-    )
+    biller_id = serializers.IntegerField(source='item.biller_id', read_only=True)
+    reminder_day = serializers.IntegerField(source='item.reminder_day', read_only=True)
+    is_daily = serializers.BooleanField(source='item.is_daily', read_only=True)
+    deferred_until = serializers.DateField(read_only=True)
+    is_deferred = serializers.SerializerMethodField()
 
-    reminder_day = serializers.IntegerField(
-        source='item.reminder_day',
-        read_only=True,
-    )
-
-    is_daily = serializers.BooleanField(
-        source='item.is_daily',
-        read_only=True,
-    )
+    def get_is_deferred(self, obj):
+        return bool(obj.deferred_until and obj.deferred_until >= date.today())
 
     class Meta:
         model = BudgetAllocation
@@ -316,6 +236,8 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'biller_id',
             'reminder_day',
             'is_daily',
+            'deferred_until',
+            'is_deferred',
 
             'amount',
             'actual_due_date',
@@ -327,7 +249,6 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'budget_end_date',
             'budget_classification',
             'priority_level',
-            'rule_applied',
             'period_half',
             'bill_reminder',
 
@@ -348,6 +269,8 @@ class BudgetAllocationSerializer(serializers.ModelSerializer):
             'biller_id',
             'reminder_day',
             'is_daily',
+            'deferred_until',
+            'is_deferred',
 
             # Automatically set when the bill is marked as paid
             'paid_date',

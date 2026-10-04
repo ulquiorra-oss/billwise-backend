@@ -11,6 +11,7 @@ Endpoints added for the mobile app.
 from calendar import monthrange
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.db import transaction
@@ -23,6 +24,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .auth_views import get_tokens_for_user
 from .models import (
+    Biller,
     BudgetAllocation,
     BudgetItem,
     Earner,
@@ -34,6 +36,7 @@ from .models import (
 from .payday import income_next_payday
 from .risk import _parse_range
 from .serializers import BudgetAllocationSerializer
+from .setup_views import _period_for
 from .views import classify_bill
 
 
@@ -266,6 +269,111 @@ def pay_bill(request, allocation_id):
     bill.save(update_fields=['is_paid', 'paid_date'])
 
     return Response(BudgetAllocationSerializer(bill).data, status=status.HTTP_200_OK)
+
+
+# ============================================================
+# MOVE TO NEXT PERIOD
+# ============================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def defer_bill(request, allocation_id):
+    """
+    Plan to pay a deferrable bill after the next payday, or undo that plan ({"deferred": false}).
+    Only bills the rules marked Deferrable can be moved. The bill's real due date does not change.
+    """
+    try:
+        bill = BudgetAllocation.objects.select_related('item', 'item__category').get(
+            budget_allocation_id=allocation_id,
+            income__earner__household=request.user,
+        )
+    except BudgetAllocation.DoesNotExist:
+        return Response({'error': 'Bill not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    deferred = request.data.get('deferred', True)
+    if isinstance(deferred, str):
+        deferred = deferred.strip().lower() not in ('false', '0', 'no', '')
+
+    if not deferred:
+        bill.deferred_until = None
+    else:
+        if bill.is_paid:
+            return Response({'error': 'This bill is already paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        if bill.budget_classification != 'Deferrable':
+            return Response({'error': "This bill can't wait, so it can't be moved."}, status=status.HTTP_400_BAD_REQUEST)
+        paydays = [
+            p for p in (
+                income_next_payday(i)
+                for i in Income.objects.filter(earner__household=request.user).select_related('income_frequency')
+            ) if p
+        ]
+        if not paydays:
+            return Response({'error': 'Set your payday first.'}, status=status.HTTP_400_BAD_REQUEST)
+        bill.deferred_until = min(paydays)
+
+    bill.save(update_fields=['deferred_until'])
+    return Response(BudgetAllocationSerializer(bill).data, status=status.HTTP_200_OK)
+
+
+# ============================================================
+# PREVIEW PRIORITY (scan review)
+# ============================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def preview_priority(request):
+    """
+    The priority a bill would get if it were saved now. Runs the same rules as a real bill (classify_bill)
+    on a stand-in object, so nothing is written. Used by the scan review screen.
+    """
+    d = request.data
+    try:
+        due = datetime.strptime(str(d.get('due_date') or ''), '%Y-%m-%d').date()
+    except ValueError:
+        return Response({'error': 'A valid due date is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    name = str(d.get('item_desc') or '').strip()
+    category = str(d.get('category') or 'Other').strip() or 'Other'
+
+    biller = None
+    try:
+        if d.get('biller_id') not in (None, ''):
+            biller = Biller.objects.filter(biller_id=int(d.get('biller_id'))).first()
+    except (TypeError, ValueError):
+        biller = None
+
+    # A recognised biller supplies the rules; otherwise the bill's own values (same defaults as a scan).
+    if biller is not None:
+        grace, penalty = biller.grace_period_days, biller.has_penalty
+    else:
+        try:
+            grace = max(0, int(d.get('grace_period_days') or 0))
+        except (TypeError, ValueError):
+            grace = 0
+        penalty = bool(d.get('penalty_classification', True))
+
+    _, start, end = _period_for(due)
+    stand_in = SimpleNamespace(
+        item=SimpleNamespace(
+            item_desc=name,
+            category=SimpleNamespace(category_desc=category),
+            penalty_classification=penalty,
+            grace_period_days=grace,
+        ),
+        actual_due_date=due,
+        budget_start_date=start,
+        budget_end_date=end,
+    )
+    priority, classification, rule, reason = classify_bill(stand_in)
+
+    return Response({
+        'priority_level': priority,
+        'budget_classification': classification,
+        'rule_applied': rule,
+        'reason': reason,
+        'grace_period_days': grace,
+        'penalty_classification': penalty,
+    }, status=status.HTTP_200_OK)
 
 
 # ============================================================

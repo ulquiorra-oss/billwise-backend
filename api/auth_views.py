@@ -6,7 +6,7 @@ from django.conf import settings
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from django.contrib.auth.hashers import make_password, check_password
 from django.utils import timezone
-from .models import Household, Earner
+from .models import Household
 import requests
 import os
 
@@ -38,7 +38,7 @@ def get_tokens_for_user(household):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def register(request):
-    """Register a new household account. Auto-creates the earner for the registrant."""
+    """Register a new household account"""
     data = request.data
 
     required_fields = ['first_name', 'last_name', 'email', 'password']
@@ -60,26 +60,16 @@ def register(request):
         last_name=data['last_name'],
         email=data['email'],
         password=make_password(data['password']),
-        total_members=1,             # the registrant counts as a member
-        no_of_earners=1,             # the registrant counts as an earner
+        total_members=0,
+        no_of_earners=0,
         no_of_dependents=0,
-        no_of_children=0,
-        no_of_seniors=0,
         housing_type='',
-        location=data.get('location', 'Cagayan de Oro'),
         daily_food_expense_min=0,
         daily_food_expense_max=0,
         daily_transport_expense_min=0,
         daily_transport_expense_max=0,
         survival_threshold_min=0,
         survival_threshold_max=0,
-    )
-
-    # The person who registers is automatically the first earner.
-    Earner.objects.create(
-        household=household,
-        earner_fname=data['first_name'],
-        earner_lname=data['last_name'],
     )
 
     tokens = get_tokens_for_user(household)
@@ -90,8 +80,7 @@ def register(request):
         'first_name': household.first_name,
         'last_name': household.last_name,
         'email': household.email,
-        'location': household.location,
-        'tokens': tokens,
+        'tokens': tokens
     }, status=status.HTTP_201_CREATED)
 
 
@@ -136,8 +125,7 @@ def login(request):
         'first_name': household.first_name,
         'last_name': household.last_name,
         'email': household.email,
-        'location': household.location,
-        'tokens': tokens,
+        'tokens': tokens
     }, status=status.HTTP_200_OK)
 
 
@@ -184,26 +172,16 @@ def google_login(request):
             last_name=last_name,
             email=email,
             password=make_password(None),
-            total_members=1,
-            no_of_earners=1,
+            total_members=0,
+            no_of_earners=0,
             no_of_dependents=0,
-            no_of_children=0,
-            no_of_seniors=0,
             housing_type='',
-            location='Cagayan de Oro',
             daily_food_expense_min=0,
             daily_food_expense_max=0,
             daily_transport_expense_min=0,
             daily_transport_expense_max=0,
             survival_threshold_min=0,
             survival_threshold_max=0,
-        )
-
-        # Auto-create the earner for the Google user.
-        Earner.objects.create(
-            household=household,
-            earner_fname=first_name,
-            earner_lname=last_name,
         )
         message = 'Account created successfully'
 
@@ -218,8 +196,7 @@ def google_login(request):
         'first_name': household.first_name,
         'last_name': household.last_name,
         'email': household.email,
-        'location': household.location,
-        'tokens': tokens,
+        'tokens': tokens
     }, status=status.HTTP_200_OK)
 
 
@@ -285,8 +262,6 @@ def get_profile(request):
             'no_of_children': household.no_of_children,
             'no_of_seniors': household.no_of_seniors,
             'housing_type': household.housing_type,
-            'location': household.location,
-            'setup_completed': household.setup_completed,
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response(
