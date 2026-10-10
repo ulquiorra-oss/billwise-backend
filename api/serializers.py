@@ -17,6 +17,15 @@ from .models import (
 # ============================================================
 
 class HouseholdSerializer(serializers.ModelSerializer):
+    # Who the dependents are (relationship only), so Edit Household can show them again.
+    dependents = serializers.SerializerMethodField()
+
+    def get_dependents(self, obj):
+        return [
+            {'relationship': d.relationship}
+            for d in obj.dependents.order_by('dependent_id')
+        ]
+
     class Meta:
         model = Household
         fields = [
@@ -29,6 +38,7 @@ class HouseholdSerializer(serializers.ModelSerializer):
             'no_of_dependents',
             'no_of_children',
             'no_of_seniors',
+            'dependents',
             'housing_type',
             'daily_food_expense_min',
             'daily_food_expense_max',

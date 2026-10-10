@@ -17,11 +17,13 @@ from rest_framework.response import Response
 
 from .models import Biller, BudgetAllocation, BudgetItem, Earner, Income, IncomeFrequency, ItemCategory
 from .payday import CANONICAL, ScheduleError, frequency_kind, next_payday, parse_schedule
+from .dependents import parse_dependents, children_and_seniors, save_dependents
 from .serializers import HouseholdSerializer
 
 DAYS_PER_MONTH = 30  # a daily cost counts as 30 days when converted to a monthly amount
 
-HOUSING_TYPES = {'Own House', 'Renting', 'With Relatives'}
+# Housing is only about rent. The older values are still accepted so existing households keep working.
+HOUSING_TYPES = {'Renting', 'Not renting', 'Own House', 'With Relatives'}
 MAX_AMOUNT = Decimal('100000000')  # DecimalField(max_digits=10, decimal_places=2)
 
 
@@ -199,6 +201,12 @@ def submit_setup(request):
         hh = data.get('household') or {}
         children = _int(hh.get('no_of_children'), 'Number of children', 0)
         seniors = _int(hh.get('no_of_seniors'), 'Number of senior citizens', 0)
+
+        # The app also sends who the dependents are. When it does, that list is the truth.
+        dep_list = parse_dependents(data)
+        if dep_list is not None:
+            children, seniors = children_and_seniors(dep_list)
+
         housing = hh.get('housing_type')
         if housing not in HOUSING_TYPES:
             raise SetupError('Choose a housing type')
@@ -230,6 +238,7 @@ def submit_setup(request):
         household.daily_transport_expense_max = daily_transport
         household.setup_completed = True
         household.save()
+        save_dependents(household, dep_list)
 
         incomes = []
         for e in earners:

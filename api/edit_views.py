@@ -34,6 +34,7 @@ from .setup_views import (
     _period_for,
 )
 from .payday import CANONICAL, ScheduleError, canonical_frequency, frequency_kind, income_next_payday, next_payday, parse_schedule
+from .dependents import parse_dependents, children_and_seniors, save_dependents
 from .views import classify_bill
 
 
@@ -173,6 +174,12 @@ def update_household_setup(request):
         hh = data.get('household') or {}
         children = _int(hh.get('no_of_children'), 'Number of children', 0)
         seniors = _int(hh.get('no_of_seniors'), 'Number of senior citizens', 0)
+
+        # The app also sends who the dependents are. When it does, that list is the truth.
+        dep_list = parse_dependents(data)
+        if dep_list is not None:
+            children, seniors = children_and_seniors(dep_list)
+
         housing = hh.get('housing_type')
         if housing not in HOUSING_TYPES:
             raise SetupError('Choose a housing type')
@@ -225,6 +232,7 @@ def update_household_setup(request):
             household.housing_type = housing
             household.no_of_earners = len(kept)
             household.save()
+            save_dependents(household, dep_list)
     except SetupError as exc:
         return _bad(str(exc))
 

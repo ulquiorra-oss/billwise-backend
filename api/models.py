@@ -100,6 +100,30 @@ class Earner(models.Model):
         return f"{self.earner_fname} {self.earner_lname}"
 
 
+class Dependent(models.Model):
+    """
+    A family member who relies on the household's earners.
+    Only the relationship is stored (Child, Parent or Grandparent).
+    """
+
+    dependent_id = models.AutoField(primary_key=True)
+
+    household = models.ForeignKey(
+        Household,
+        on_delete=models.CASCADE,
+        db_column='household_id',
+        related_name='dependents'
+    )
+
+    relationship = models.CharField(max_length=20)
+
+    class Meta:
+        db_table = 'dependent'
+
+    def __str__(self):
+        return self.relationship
+
+
 class IncomeFrequency(models.Model):
     frequency_id = models.AutoField(primary_key=True)
     frequency_desc = models.CharField(max_length=100)
