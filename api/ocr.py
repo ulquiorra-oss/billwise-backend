@@ -9,15 +9,22 @@ Supports:
 
 What changed vs. the old version:
   1. Digital PDFs skip OCR entirely and read the embedded text.
-  2. Photos are rotated upright using EXIF before OCR (phone photos were often sideways).
-  3. Better preprocessing (upscale to ~2000px, autocontrast, binarize) and up to three
-     OCR passes; the pass that yields the best result wins.
-  4. Amount and due date are found by LABELS ("Total Amount Due", "Due Date"), not by
-     "largest number" / "earliest date". Old logic is kept only as a fallback.
-  5. Merchant matching uses whole words, so "account" no longer matches "co".
+  2. Photos are rotated upright using EXIF before OCR.
+  3. Better preprocessing (upscale, autocontrast, binarize) with up to three OCR passes.
+  4. Amount and due date are found by LABELS, not by "largest number" / "earliest date".
+  5. Merchant matching uses whole words and tolerates small OCR errors
+     ("WATER DISTRIC!" still matches as a water district).
+  6. Merchant extraction rejects garbage lines ("1 (5 ret df") and address lines
+     ("ALONG L oO", "Blk 4 Lot 5 Villa Angela ...").
+  7. Due date extraction has a dateutil fallback and reads bare M-D cells (like "9-23").
+  8. Amount extraction tolerates spaces around decimals ("506. 71") and OCR
+     misspellings of "total bill amount" ("TOTAL BRILL AMOUN)").
+  9. Amount extraction prefers the current month's charge from a utility bill's
+     readings table (e.g. COWD's "READINGS | CONSUMED | AMOUNT" row) over the
+     total including arrears.
 
-Public interface is unchanged: scan_bill_image(file_obj, is_pdf=False) returns a dict with
-amount, due_date, merchant, raw_text (plus two extras: method, confidence).
+Public interface: scan_bill_image(file_obj, is_pdf=False) returns a dict with
+amount, due_date, merchant, raw_text, method, confidence.
 """
 
 import io
@@ -40,6 +47,11 @@ except ImportError:  # pragma: no cover
     cv2 = None
     np = None
 
+try:  # optional: robust date parsing fallback
+    from dateutil import parser as date_parser
+except ImportError:  # pragma: no cover
+    date_parser = None
+
 
 # ---- Tesseract path (Windows) ----
 if os.name == 'nt':
@@ -58,13 +70,13 @@ if os.name == 'nt':
 # IMAGE PREPROCESSING
 # ============================================================
 
-TARGET_WIDTH = 2000   # Tesseract works best when text is ~30+ px tall
-MAX_WIDTH = 3200      # don't feed it huge images (slow, no gain)
+TARGET_WIDTH = 2200
+MAX_WIDTH = 4096
 
 
 def _prepare_gray(image):
     """Upright, flatten transparency, grayscale, resize, autocontrast."""
-    image = ImageOps.exif_transpose(image)  # phone photos carry rotation in EXIF
+    image = ImageOps.exif_transpose(image)
 
     if image.mode in ('RGBA', 'LA', 'P'):
         rgba = image.convert('RGBA')
@@ -91,7 +103,6 @@ def _sharpen(gray):
 
 
 def _otsu_threshold(hist):
-    """Pure-Python Otsu threshold from a 256-bin histogram."""
     total = sum(hist)
     sum_all = sum(i * h for i, h in enumerate(hist))
     sum_b = 0
@@ -116,9 +127,8 @@ def _otsu_threshold(hist):
 
 
 def _binarize(gray):
-    """Black text on white. Adaptive (OpenCV) when available, else global Otsu."""
     if cv2 is not None and np is not None:
-        arr = cv2.medianBlur(np.array(gray), 3)
+        arr = cv2.medianBlur(np.array(gray), 5)
         out = cv2.adaptiveThreshold(
             arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 41, 15
         )
@@ -130,7 +140,6 @@ def _binarize(gray):
 
 
 def _ocr(image, psm):
-    """Run Tesseract; return (text with line breaks, mean word confidence 0-100)."""
     config = f'--oem 3 --psm {psm} -c preserve_interword_spaces=1'
     data = pytesseract.image_to_data(
         image, lang='eng', config=config, output_type=pytesseract.Output.DICT
@@ -177,13 +186,31 @@ def _fix_digits(line):
 # AMOUNT EXTRACTION
 # ============================================================
 
-# 1,234.56 | 1234.56 | 12.00   (always two decimals; skips percentages and negatives)
-AMOUNT_RE = re.compile(r'(?<![\d.,\-])((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![\d%])')
+# 1,234.56 | 1234.56 | 12.00 — always two decimals.
+# Also matches "506. 71" (a space before the decimals), which OCR often inserts.
+AMOUNT_RE = re.compile(
+    r'(?<![\d.,\-])'
+    r'((?:\d{1,3}(?:,\d{3})+|\d+)\.\s?\d{2})'
+    r'(?![\d%])'
+)
 
 # (priority, pattern). Higher priority wins.
 AMOUNT_KEYWORDS = [
+    # Highest priority — "amount due until due date" is what you actually pay.
+    (110, re.compile(r'amount\s+due\s+until\s+due\s+date', re.I)),
+    (108, re.compile(r'amount\s+due\s+(?:before|on)\s+due\s+date', re.I)),
+    (105, re.compile(r'(?:total\s+)?amount\s+due\s+(?:until|before|on)\b', re.I)),
+
+    # Standard labeled totals.
     (100, re.compile(r'total\s+amount\s+due|amount\s+due|total\s+due|net\s+amount\s+due', re.I)),
     (95, re.compile(r'(?:please\s+)?pay\s+(?:this\s+)?amount|amount\s+payable|balance\s+due|amount\s+to\s+pay', re.I)),
+
+    # Fuzzy matches that tolerate common OCR mistakes in "total bill amount".
+    (90, re.compile(r'total\s+payable\s+amount|total\s+payable', re.I)),
+    (88, re.compile(r'total\s+b\w{0,3}l+\s+amou?n\w?', re.I)),
+    (85, re.compile(r'total\s+(?:bill|bri?ll|bi11|bil1)\s+amount?', re.I)),
+
+    # Lower-priority fallbacks.
     (80, re.compile(r'grand\s+total|total\s+amount|total\s+payable', re.I)),
     (60, re.compile(r'current\s+(?:charges|bill)|bill\s+amount', re.I)),
     (50, re.compile(r'\btotal\b', re.I)),
@@ -198,18 +225,25 @@ AMOUNT_NEGATIVE = re.compile(
 )
 
 # Never the amount to pay now, even if the line also says "amount due"
-# (e.g. "Amount due after due date", "Late payment charge")
 AMOUNT_HARD_NEGATIVE = re.compile(r'\b(after|late|penalt\w*|surcharge|overdue)\b', re.I)
 
-STRONG_AMOUNT_SCORE = 90
+# A labelled match scoring at least this value is trusted even if the line
+# also contains a normally-excluded word (like "total").
+STRONG_AMOUNT_SCORE = 85
 
 
 def _amounts_in(line):
-    return [(m.start(), float(m.group(1).replace(',', ''))) for m in AMOUNT_RE.finditer(line)]
+    results = []
+    for m in AMOUNT_RE.finditer(line):
+        raw = m.group(1).replace(',', '').replace(' ', '')
+        try:
+            results.append((m.start(), float(raw)))
+        except ValueError:
+            continue
+    return results
 
 
 def _best_keyword(low_line):
-    """Highest-priority amount keyword on the line -> (score, end_position)."""
     best = (0, 0)
     for score, pattern in AMOUNT_KEYWORDS:
         match = pattern.search(low_line)
@@ -218,16 +252,77 @@ def _best_keyword(low_line):
     return best
 
 
+# ------------------------------------------------------------
+# Current month's charge (from a utility bill's readings table)
+# ------------------------------------------------------------
+
+# Headers that sit directly above the current-month charge row.
+CURRENT_ROW_HEADER_RE = re.compile(
+    r'\b(?:readings?|consumed|cubic\s*meter|present|this\s+month|current|amount)\b',
+    re.I,
+)
+
+# Lines that are never the current-month charge even if they sit right after
+# a header line (they hold the total, arrears, etc.).
+CURRENT_ROW_EXCLUDE_RE = re.compile(
+    r'\b(?:arrears?|previous|prev|total|amount\s+due|due\s+date|'
+    r'delinquent|penalt\w*|surcharge|adjustment|deposit|'
+    r'unpaid|balance\s+forward|month\s+of)\b',
+    re.I,
+)
+
+
+def extract_current_charge(text):
+    """
+    Find this month's charge from a readings table (e.g. COWD).
+
+    Strategy: find a line with a "readings / consumed / present / cubic meter"
+    header, then scan the next 1-3 lines for the first amount that isn't on
+    an excluded line (arrears, total due, etc.).
+
+    Returns None if no clear table row is found, so the caller can fall back
+    to `extract_amount`.
+    """
+    lines = _lines(text)
+
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if not CURRENT_ROW_HEADER_RE.search(low):
+            continue
+        if CURRENT_ROW_EXCLUDE_RE.search(low):
+            # Header line itself mentions something we don't trust (e.g. "TOTAL")
+            continue
+
+        for j in range(i + 1, min(i + 4, len(lines))):
+            candidate_line = lines[j]
+            candidate_low = candidate_line.lower()
+
+            if CURRENT_ROW_EXCLUDE_RE.search(candidate_low):
+                continue
+
+            values = [v for _, v in _amounts_in(candidate_line) if v > 0]
+            if values:
+                # Take the LAST amount on the row (the AMOUNT column is rightmost).
+                return values[-1]
+
+    return None
+
+
 def extract_amount(text):
     """
     Find the amount to pay.
 
-    1. Look for labelled amounts ("Total Amount Due ... 1,234.56"), on the same line or the
-       next two lines. The strongest label wins; ties go to the larger value.
-    2. Fallback: the largest amount that isn't on a subtotal/VAT/penalty line.
+    Priority:
+      1. The current month's charge from a readings table (utility bills).
+      2. A labeled total ("Total Amount Due", "Amount Due Until Due Date", etc.).
+      3. The largest non-excluded amount on the page.
     """
+    current = extract_current_charge(text)
+    if current is not None:
+        return current
+
     lines = _lines(text)
-    best = None  # (score, value)
+    best = None
 
     for i, line in enumerate(lines):
         low = line.lower()
@@ -288,18 +383,29 @@ DATE_DMY_TEXT = re.compile(rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{_MON}\.?,?\s+(\d{
 DATE_ISO = re.compile(r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b')
 DATE_NUMERIC = re.compile(r'\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})\b')
 
+DATE_NO_YEAR = re.compile(r'(?<![\d/.-])(\d{1,2})\s*[-/.]\s*(\d{1,2})(?![\d/.-])')
+
 DUE_STRONG = re.compile(
-    r'due\s*date|date\s+due|pay(?:ment)?\s+(?:on\s+or\s+)?before|on\s+or\s+before|'
+    r'due\s*date|date\s+due|'
+    r'pay(?:ment)?\s+(?:on\s+or\s+)?before|on\s+or\s+before|'
     r'payment\s+due|due\s+on|due\s+by|pay\s+by|settle\s+before',
     re.I,
 )
 DUE_WEAK = re.compile(r'\bdue\b', re.I)
 
-# Dates on these lines are NOT the due date
 DATE_NEGATIVE = re.compile(
     r'bill(?:ing)?\s+date|statement\s+date|invoice\s+date|date\s+(?:of\s+)?issue|issued|'
     r'reading|period|cut-?off|disconnect\w*|date\s+paid|paid\s+on|transaction\s+date|receipt\s+date',
     re.I,
+)
+
+LOOSE_DATE_RE = re.compile(
+    r'('
+    r'\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*\d{2,4}'
+    r'|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{2,4}'
+    r'|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+\d{2,4}'
+    r')',
+    re.IGNORECASE,
 )
 
 
@@ -314,8 +420,20 @@ def _make_date(year, month, day):
         return None
 
 
-def _dates_in(line):
-    """All dates on a line as [(position, datetime)], in reading order."""
+def _dates_no_year_in(line, year):
+    found = []
+    for m in DATE_NO_YEAR.finditer(line):
+        a, b = int(m.group(1)), int(m.group(2))
+        month, day = (b, a) if a > 12 and b <= 12 else (a, b)
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        d = _make_date(year, month, day)
+        if d:
+            found.append((m.start(), d))
+    return found
+
+
+def _dates_in(line, assume_year=None):
     found = []
 
     for m in DATE_MDY_TEXT.finditer(line):
@@ -335,24 +453,25 @@ def _dates_in(line):
 
     for m in DATE_NUMERIC.finditer(line):
         a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        # Philippine bills are usually MM/DD/YYYY; flip only when that's impossible.
         month, day = (b, a) if a > 12 and b <= 12 else (a, b)
         d = _make_date(y, month, day)
         if d:
             found.append((m.start(), d))
 
+    if assume_year:
+        found.extend(_dates_no_year_in(line, assume_year))
+
     return sorted(found, key=lambda item: item[0])
 
 
-def _date_after_label(lines, pattern):
-    """First date that belongs to a line matching `pattern` (same line or the next two)."""
+def _date_after_label(lines, pattern, assume_year=None):
     for i, line in enumerate(lines):
         low = line.lower()
         match = pattern.search(low)
         if not match:
             continue
 
-        same = _dates_in(line)
+        same = _dates_in(line, assume_year=assume_year)
         after = [d for pos, d in same if pos >= match.end()]
         if after:
             return after[0]
@@ -360,11 +479,9 @@ def _date_after_label(lines, pattern):
             return same[-1][1]
 
         for nxt in lines[i + 1:i + 3]:
-            dates = [d for _, d in _dates_in(nxt)]
+            dates = [d for _, d in _dates_in(nxt, assume_year=assume_year)]
             if not dates:
                 continue
-            # Header row like "Billing Date   Due Date" followed by a row of values:
-            # pick the value in the same column position as the due-date label.
             labels = sorted(
                 [(m.start(), 'due') for m in DUE_STRONG.finditer(low)]
                 + [(m.start(), 'other') for m in DATE_NEGATIVE.finditer(low)]
@@ -376,24 +493,48 @@ def _date_after_label(lines, pattern):
     return None
 
 
+def _parse_with_dateutil(lines):
+    if date_parser is None:
+        return None
+
+    priority, other = [], []
+    for line in lines:
+        low = line.lower()
+        for m in LOOSE_DATE_RE.finditer(line):
+            raw = m.group(1)
+            try:
+                parsed = date_parser.parse(raw, fuzzy=False)
+            except (ValueError, OverflowError):
+                continue
+            (priority if DUE_WEAK.search(low) else other).append(parsed)
+
+    pool = priority or other
+    if not pool:
+        return None
+
+    now = datetime.now()
+    future = [d for d in pool if d >= now]
+    return min(future) if future else max(pool)
+
+
 def extract_due_date(text):
-    """
-    Find the due date, as YYYY-MM-DD.
-
-    1. Date next to "Due Date" / "Pay on or before" / "Payment due" and similar labels.
-    2. Date next to any line containing the word "due".
-    3. Fallback: among dates NOT on billing/statement/reading lines, the earliest future
-       date, else the most recent one.
-    """
     lines = _lines(text)
+    now = datetime.now()
 
-    chosen = _date_after_label(lines, DUE_STRONG) or _date_after_label(lines, DUE_WEAK)
+    chosen = (
+        _date_after_label(lines, DUE_STRONG, assume_year=now.year)
+        or _date_after_label(lines, DUE_WEAK, assume_year=now.year)
+    )
     if chosen:
         return chosen.strftime('%Y-%m-%d')
 
+    fuzzy = _parse_with_dateutil(lines)
+    if fuzzy:
+        return fuzzy.strftime('%Y-%m-%d')
+
     clean, everything = [], []
     for line in lines:
-        dates = [d for _, d in _dates_in(line)]
+        dates = [d for _, d in _dates_in(line, assume_year=now.year)]
         everything.extend(dates)
         if not DATE_NEGATIVE.search(line.lower()):
             clean.extend(dates)
@@ -402,7 +543,6 @@ def extract_due_date(text):
     if not pool:
         return None
 
-    now = datetime.now()
     future = [d for d in pool if d >= now]
     chosen = min(future) if future else max(pool)
     return chosen.strftime('%Y-%m-%d')
@@ -412,35 +552,53 @@ def extract_due_date(text):
 # MERCHANT EXTRACTION
 # ============================================================
 
-# Words that are almost never a real merchant name
 GENERIC_HEADERS = {
     'receipt', 'invoice', 'statement', 'bill', 'official', 'summary', 'notice',
     'tax', 'billing', 'page', 'original', 'duplicate', 'copy', 'customer', 'account',
 }
 
-# Whole-word hints that a line is a company name
 COMPANY_HINT_RE = re.compile(
     r'\b(?:corporation|corp|inc|incorporated|company|co|ltd|llc|pbc|enterprises?|holdings|'
-    r'group|cooperative|coop|electric|telecom|communications|utilities|water\s+district|'
-    r'meralco|maynilad|pldt|globe|converge|cepalco|moresco|smart|manila\s+water|sky|dito)\b',
+    r'group|cooperative|coop|'
+    r'electric\w*|telecom\w*|communication\w*|utilit\w*|water\s+d\w*|waterworks|'
+    r'meralco|maynilad|pldt|globe|converge|cepalco|moresco|smart|manila\s+water|sky|dito|'
+    r'cagayan|oro\s+city)\b',
     re.I,
 )
 
-# Lines that describe the customer or contact details, not the merchant
 MERCHANT_SKIP_RE = re.compile(
     r'bill\s+to|customer|account\s*(?:no|number|#)|invoice\s*(?:no|number|#)|receipt\s*(?:no|number|#)|'
     r'tel\b|phone|www\.|http|@|address|attn|total|amount|date',
     re.I,
 )
 
+REAL_WORD_RE = re.compile(r'[A-Za-z]{4,}')
+
+MANY_SINGLE_LETTERS_RE = re.compile(
+    r'(?<![A-Za-z])(?:[A-Za-z](?![A-Za-z]))(?:\s+(?:[A-Za-z](?![A-Za-z]))){2,}'
+)
+
+ADDRESS_HINT_RE = re.compile(
+    r'\b(?:villa|street|st\.|ave|avenue|blk|blk\.|lot|brgy|barangay|zone|purok|subdivision|'
+    r'subd\.?|phase|north|south|east|west|purok)\b',
+    re.I,
+)
+
+FUZZY_BILLER_HINTS = (
+    'water district', 'water districts', 'waterworks',
+    'electric', 'electricity', 'power',
+    'internet', 'broadband', 'telecom', 'communications',
+    'maynilad', 'meralco', 'pldt', 'globe', 'converge', 'cepalco', 'moresco',
+    'manila water', 'cagayan', 'misamis',
+)
+
+
+def _looks_like_biller(line):
+    low = line.lower()
+    return any(h in low for h in FUZZY_BILLER_HINTS)
+
 
 def extract_merchant(text):
-    """
-    Identify the biller/merchant name.
-
-    1. A line near the top that looks like a company name (whole-word match).
-    2. Otherwise the first alphabetic line that isn't a generic header or customer detail.
-    """
     lines = _lines(text)
     if not lines:
         return None
@@ -451,17 +609,50 @@ def extract_merchant(text):
         if COMPANY_HINT_RE.search(line):
             return line
 
-    for line in lines[:10]:
-        lower = line.lower().rstrip(':').strip()
-        alpha_count = sum(c.isalpha() for c in line)
-        digit_count = sum(c.isdigit() for c in line)
-        if alpha_count < 3 or len(line) > 60 or digit_count > alpha_count:
+    for line in lines[:15]:
+        if len(line) > 90 or len(line) < 6:
             continue
         if MERCHANT_SKIP_RE.search(line):
             continue
-        if lower in GENERIC_HEADERS or any(lower.startswith(h) for h in GENERIC_HEADERS):
+        if not REAL_WORD_RE.search(line):
             continue
-        return line
+        if _looks_like_biller(line):
+            m = REAL_WORD_RE.search(line)
+            if m and m.start() > 0:
+                return line[m.start():]
+            return line
+
+    for line in lines[:10]:
+        clean = line.strip(" :.-_")
+        lower = clean.lower()
+
+        if lower in GENERIC_HEADERS:
+            continue
+        if any(lower.startswith(h) for h in GENERIC_HEADERS):
+            continue
+        if MERCHANT_SKIP_RE.search(clean):
+            continue
+        if ADDRESS_HINT_RE.search(clean):
+            continue
+        if MANY_SINGLE_LETTERS_RE.search(clean):
+            continue
+
+        letters = sum(c.isalpha() for c in clean)
+        digits = sum(c.isdigit() for c in clean)
+        if letters < 3 or len(clean) > 60:
+            continue
+        if digits >= letters:
+            continue
+
+        nonspace = [c for c in clean if not c.isspace()]
+        if not nonspace:
+            continue
+        if letters / len(nonspace) < 0.6:
+            continue
+        if not REAL_WORD_RE.search(clean):
+            continue
+
+        return clean
 
     return None
 
@@ -471,7 +662,6 @@ def extract_merchant(text):
 # ============================================================
 
 def _pdf_text(file_obj, max_pages=2):
-    """Embedded text of a digital PDF (empty string for scans or if PyMuPDF is missing)."""
     if fitz is None:
         return ''
     file_obj.seek(0)
@@ -484,7 +674,6 @@ def _pdf_text(file_obj, max_pages=2):
 
 
 def pdf_first_page_to_image(file_obj, dpi=300):
-    """Render the first page of a PDF into a PIL Image (for scanned PDFs)."""
     if fitz is None:
         raise RuntimeError(
             "PyMuPDF is required to scan PDF receipts. Install it with `pip install pymupdf`."
@@ -497,7 +686,7 @@ def pdf_first_page_to_image(file_obj, dpi=300):
             raise ValueError('The PDF has no pages.')
 
         page = doc.load_page(0)
-        zoom = dpi / 72  # PDF points are 72 per inch
+        zoom = dpi / 72
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
         return Image.open(io.BytesIO(pix.tobytes('png')))
     finally:
@@ -521,19 +710,15 @@ def _extract_fields(text):
 
 
 def _ocr_best(image):
-    """
-    OCR the image up to three ways and keep the best result.
-    Stops early once the first pass is clearly good.
-    """
     gray = _prepare_gray(image)
 
     attempts = [
-        lambda: (_sharpen(gray), 6),   # grayscale, uniform text block
-        lambda: (_binarize(gray), 6),  # black/white, helps with shadows and noise
-        lambda: (gray, 4),             # single column of varying sizes
+        lambda: (_sharpen(gray), 6),
+        lambda: (_binarize(gray), 6),
+        lambda: (gray, 4),
     ]
 
-    best = None  # (score, text, confidence, fields)
+    best = None
     for make in attempts:
         prepared, psm = make()
         text, confidence = _ocr(prepared, psm)
@@ -555,13 +740,6 @@ def _ocr_best(image):
 
 
 def scan_bill_image(file_obj, is_pdf=False):
-    """
-    Full pipeline: (read PDF text | preprocess + OCR) -> extract fields.
-
-    Returns:
-        dict with keys: amount, due_date, merchant, raw_text, method, confidence
-        method is 'pdf_text' or 'ocr'; confidence is the OCR confidence (100 for pdf_text).
-    """
     if is_pdf:
         text = _pdf_text(file_obj)
         if _has_real_text(text):
@@ -569,7 +747,6 @@ def scan_bill_image(file_obj, is_pdf=False):
             if fields['amount'] is not None:
                 return {**fields, 'raw_text': text, 'method': 'pdf_text', 'confidence': 100.0}
 
-            # Text layer exists but has no readable amount (e.g. amounts are images): try OCR too.
             ocr_text, confidence, ocr_fields = _ocr_best(pdf_first_page_to_image(file_obj))
             merged = {k: fields[k] if fields[k] is not None else ocr_fields[k] for k in fields}
             return {**merged, 'raw_text': text + '\n' + ocr_text, 'method': 'pdf_text+ocr',
