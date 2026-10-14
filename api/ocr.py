@@ -12,16 +12,16 @@ What changed vs. the old version:
   2. Photos are rotated upright using EXIF before OCR.
   3. Better preprocessing (upscale, autocontrast, binarize) with up to three OCR passes.
   4. Amount and due date are found by LABELS, not by "largest number" / "earliest date".
-  5. Merchant matching uses whole words and tolerates small OCR errors
-     ("WATER DISTRIC!" still matches as a water district).
-  6. Merchant extraction rejects garbage lines ("1 (5 ret df") and address lines
-     ("ALONG L oO", "Blk 4 Lot 5 Villa Angela ...").
-  7. Due date extraction has a dateutil fallback and reads bare M-D cells (like "9-23").
-  8. Amount extraction tolerates spaces around decimals ("506. 71") and OCR
-     misspellings of "total bill amount" ("TOTAL BRILL AMOUN)").
+  5. Merchant matching uses whole words and tolerates small OCR errors.
+  6. Merchant extraction rejects garbage lines and address lines.
+  7. Due date extraction has a dateutil fallback and reads bare M-D cells.
+  8. Amount extraction tolerates spaces around decimals and OCR misspellings
+     of "total bill amount".
   9. Amount extraction prefers the current month's charge from a utility bill's
      readings table (e.g. COWD's "READINGS | CONSUMED | AMOUNT" row) over the
      total including arrears.
+ 10. Amount extraction treats "6, 255.86" as a single number (not two), and
+     rejects tiny fragments from the fallback pool when larger amounts exist.
 
 Public interface: scan_bill_image(file_obj, is_pdf=False) returns a dict with
 amount, due_date, merchant, raw_text, method, confidence.
@@ -186,11 +186,12 @@ def _fix_digits(line):
 # AMOUNT EXTRACTION
 # ============================================================
 
-# 1,234.56 | 1234.56 | 12.00 — always two decimals.
-# Also matches "506. 71" (a space before the decimals), which OCR often inserts.
+# 1,234.56 | 1234.56 | 12.00 | 6, 255.86 — always two decimals.
+# Allows an optional space before the decimals ("506. 71") or after a
+# comma ("6, 255.86"), both of which OCR inserts on some bills.
 AMOUNT_RE = re.compile(
     r'(?<![\d.,\-])'
-    r'((?:\d{1,3}(?:,\d{3})+|\d+)\.\s?\d{2})'
+    r'((?:\d{1,3}(?:,\s?\d{3})+|\d+)\.\s?\d{2})'
     r'(?![\d%])'
 )
 
@@ -231,6 +232,10 @@ AMOUNT_HARD_NEGATIVE = re.compile(r'\b(after|late|penalt\w*|surcharge|overdue)\b
 # also contains a normally-excluded word (like "total").
 STRONG_AMOUNT_SCORE = 85
 
+# A fragment smaller than this is never the total (filters out partial reads
+# like "255.86" from "6, 255.86" when the comma is present).
+MIN_PLAUSIBLE_TOTAL = 100.0
+
 
 def _amounts_in(line):
     results = []
@@ -256,14 +261,11 @@ def _best_keyword(low_line):
 # Current month's charge (from a utility bill's readings table)
 # ------------------------------------------------------------
 
-# Headers that sit directly above the current-month charge row.
 CURRENT_ROW_HEADER_RE = re.compile(
     r'\b(?:readings?|consumed|cubic\s*meter|present|this\s+month|current|amount)\b',
     re.I,
 )
 
-# Lines that are never the current-month charge even if they sit right after
-# a header line (they hold the total, arrears, etc.).
 CURRENT_ROW_EXCLUDE_RE = re.compile(
     r'\b(?:arrears?|previous|prev|total|amount\s+due|due\s+date|'
     r'delinquent|penalt\w*|surcharge|adjustment|deposit|'
@@ -276,12 +278,8 @@ def extract_current_charge(text):
     """
     Find this month's charge from a readings table (e.g. COWD).
 
-    Strategy: find a line with a "readings / consumed / present / cubic meter"
-    header, then scan the next 1-3 lines for the first amount that isn't on
-    an excluded line (arrears, total due, etc.).
-
-    Returns None if no clear table row is found, so the caller can fall back
-    to `extract_amount`.
+    Looks for a "readings / consumed / cubic meter" header, then scans the
+    next 1-3 lines for the first amount that isn't on an excluded line.
     """
     lines = _lines(text)
 
@@ -290,7 +288,6 @@ def extract_current_charge(text):
         if not CURRENT_ROW_HEADER_RE.search(low):
             continue
         if CURRENT_ROW_EXCLUDE_RE.search(low):
-            # Header line itself mentions something we don't trust (e.g. "TOTAL")
             continue
 
         for j in range(i + 1, min(i + 4, len(lines))):
@@ -302,7 +299,6 @@ def extract_current_charge(text):
 
             values = [v for _, v in _amounts_in(candidate_line) if v > 0]
             if values:
-                # Take the LAST amount on the row (the AMOUNT column is rightmost).
                 return values[-1]
 
     return None
@@ -314,8 +310,8 @@ def extract_amount(text):
 
     Priority:
       1. The current month's charge from a readings table (utility bills).
-      2. A labeled total ("Total Amount Due", "Amount Due Until Due Date", etc.).
-      3. The largest non-excluded amount on the page.
+      2. A labeled total ("Amount Due Until Due Date", etc.).
+      3. The largest non-excluded amount on the page, if it's plausible.
     """
     current = extract_current_charge(text)
     if current is not None:
@@ -356,13 +352,20 @@ def extract_amount(text):
     if best:
         return best[1]
 
+    # Fallback: pick the largest non-excluded amount, but only if it's
+    # plausibly a total (>= MIN_PLAUSIBLE_TOTAL). This rejects tiny fragments
+    # like "255.86" extracted from "6, 255.86" when the comma was misread.
     everything, clean = [], []
     for line in lines:
         values = [v for _, v in _amounts_in(line) if v > 0]
         everything.extend(values)
         if not AMOUNT_NEGATIVE.search(line.lower()):
             clean.extend(values)
-    pool = clean or everything
+
+    pool = [v for v in (clean or everything) if v >= MIN_PLAUSIBLE_TOTAL]
+    if not pool:
+        # Nothing plausible; return the largest raw amount as a last resort
+        pool = clean or everything
     return max(pool) if pool else None
 
 
