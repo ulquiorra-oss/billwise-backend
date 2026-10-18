@@ -12,10 +12,39 @@ urlpatterns = [
     # AUTHENTICATION
     # ============================================================
     path('auth/register/', auth_views.register, name='register'),
+    path('auth/verify-email/', auth_views.verify_email, name='verify-email'),
+
     path('auth/login/', auth_views.login, name='login'),
+    path(
+    'auth/login/verify-otp/',
+    auth_views.verify_login_otp,
+    name='login-verify-otp',
+),
+
     path('auth/google/', auth_views.google_login, name='google-login'),
+    path(
+    'auth/google/verify-otp/',
+    auth_views.verify_google_otp,
+    name='google-verify-otp',
+),
+    path(
+    'auth/google/resend-otp/',
+    auth_views.resend_google_otp,
+    name='google-resend-otp',
+),
+
     path('auth/logout/', auth_views.logout, name='logout'),
     path('auth/profile/', auth_views.get_profile, name='profile'),
+    path(
+    'auth/trusted-devices/',
+    auth_views.list_trusted_devices,
+    name='list-trusted-devices',
+),
+path(
+    'auth/trusted-devices/<uuid:device_id>/revoke/',
+    auth_views.revoke_trusted_device,
+    name='revoke-trusted-device',
+),
     path('auth/debug/', auth_views.debug_token, name='debug'),
 
     # Token refresh - keeps users logged in

@@ -1,11 +1,12 @@
 from django.db import models
-
+import uuid
 
 class Household(models.Model):
     household_id = models.AutoField(primary_key=True)
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
+    email_verified = models.BooleanField(default=True)
     password = models.CharField(max_length=255)
     total_members = models.IntegerField(default=0)
     no_of_earners = models.IntegerField(default=0)
@@ -440,3 +441,148 @@ class BudgetAllocation(models.Model):
 
     def __str__(self):
         return f"Allocation for {self.item} - {self.priority_level}"
+
+class GoogleOTPVerification(models.Model):
+    """Stores short-lived OTP challenges for Google authentication."""
+
+    challenge_id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    email = models.EmailField(db_index=True)
+    first_name = models.CharField(max_length=100, blank=True, default='')
+    last_name = models.CharField(max_length=100, blank=True, default='')
+    otp_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
+    resend_count = models.PositiveSmallIntegerField(default=0)
+    last_sent_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'google_otp_verification'
+        indexes = [
+            models.Index(
+                fields=['email', 'consumed_at'],
+                name='google_otp_email_consumed_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Google OTP challenge for {self.email}'
+
+class EmailOTPVerification(models.Model):
+    """Stores OTP challenges for email verification and regular login."""
+
+    PURPOSE_CHOICES = [
+        ('registration', 'Registration Email Verification'),
+        ('login', 'Login Verification'),
+    ]
+
+    challenge_id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    household = models.ForeignKey(
+        Household,
+        on_delete=models.CASCADE,
+        related_name='email_otp_challenges',
+    )
+    purpose = models.CharField(
+        max_length=20,
+        choices=PURPOSE_CHOICES,
+    )
+    otp_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
+    resend_count = models.PositiveSmallIntegerField(default=0)
+    last_sent_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'email_otp_verification'
+        indexes = [
+            models.Index(
+                fields=['household', 'purpose', 'consumed_at'],
+                name='email_otp_purpose_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.purpose} OTP for household {self.household_id}'
+
+class TrustedDevice(models.Model):
+    """Stores trusted devices for household accounts."""
+
+    device_id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    household = models.ForeignKey(
+        Household,
+        on_delete=models.CASCADE,
+        related_name='trusted_devices',
+    )
+
+    device_token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+    )
+
+    device_name = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'trusted_device'
+        indexes = [
+            models.Index(
+                fields=['household', 'expires_at'],
+                name='trusted_device_exp_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Trusted device for household {self.household_id}'
+
+
+class RevokedRefreshToken(models.Model):
+    """Tracks refresh tokens that have already been used or revoked."""
+
+    jti = models.CharField(
+        max_length=255,
+        unique=True,
+    )
+
+    household = models.ForeignKey(
+        Household,
+        on_delete=models.CASCADE,
+        related_name='revoked_refresh_tokens',
+    )
+
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'revoked_refresh_token'
+        indexes = [
+            models.Index(
+                fields=['household', 'expires_at'],
+                name='revoked_refresh_exp_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Revoked refresh token for household {self.household_id}'

@@ -9,12 +9,12 @@ Endpoints added for the mobile app.
   GET/PUT /api/income/monthly/     -> read / set the household's monthly income
 """
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from rest_framework import status
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -32,6 +32,7 @@ from .models import (
     Income,
     IncomeFrequency,
     ItemCategory,
+    RevokedRefreshToken
 )
 from .payday import income_next_payday
 from .risk import _parse_range
@@ -44,26 +45,82 @@ from .views import classify_bill
 # TOKEN REFRESH
 # ============================================================
 
+
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
 def refresh_token(request):
     raw = request.data.get('refresh')
+
     if not raw:
-        return Response({'error': 'refresh is required'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {'error': 'refresh is required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     claim = settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id')
+
     try:
-        old = RefreshToken(raw)  # verifies signature, expiry and blacklist
-        household = Household.objects.get(household_id=old[claim])
+        old = RefreshToken(raw)
+
+        household_id = old.get(claim)
+        jti = old.get('jti')
+        exp = old.get('exp')
+
+        if not household_id or not jti or not exp:
+            raise TokenError('Required refresh token claims are missing')
+
+        household = Household.objects.get(
+            household_id=household_id
+        )
+
     except (TokenError, Household.DoesNotExist, KeyError):
         return Response(
             {'error': 'Refresh token is invalid or expired'},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    # Returns {'access': ..., 'refresh': ...} (rotated pair)
-    return Response(get_tokens_for_user(household), status=status.HTTP_200_OK)
+    if not household.email_verified:
+        return Response(
+            {
+                'error': (
+                    'Please verify your email before refreshing tokens.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Reject refresh tokens that have already been used.
+    if RevokedRefreshToken.objects.filter(jti=jti).exists():
+        return Response(
+            {'error': 'Refresh token has already been used or revoked'},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Generate replacement tokens before revoking the submitted token.
+    tokens = get_tokens_for_user(household)
+
+    # The unique jti constraint prevents the same token from being
+    # successfully consumed twice, including concurrent requests.
+    try:
+        with transaction.atomic():
+            RevokedRefreshToken.objects.create(
+                jti=jti,
+                household=household,
+                expires_at=datetime.fromtimestamp(
+                    exp,
+                    tz=timezone.utc,
+                ),
+            )
+    except IntegrityError:
+        return Response(
+            {'error': 'Refresh token has already been used or revoked'},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    return Response(tokens, status=status.HTTP_200_OK)
+
+
 
 
 # ============================================================
