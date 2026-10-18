@@ -7,24 +7,19 @@ Supports:
   - PDFs. Digital PDFs have their text read directly (near-100% accurate);
     scanned PDFs are rendered with PyMuPDF and OCR'd (no Poppler needed).
 
-What changed vs. the old version:
-  1. Digital PDFs skip OCR entirely and read the embedded text.
-  2. Photos are rotated upright using EXIF before OCR.
-  3. Better preprocessing (upscale, autocontrast, binarize) with up to three OCR passes.
-  4. Amount and due date are found by LABELS, not by "largest number" / "earliest date".
-  5. Merchant matching uses whole words and tolerates small OCR errors.
-  6. Merchant extraction rejects garbage lines and address lines.
-  7. Due date extraction has a dateutil fallback and reads bare M-D cells.
-  8. Amount extraction tolerates spaces around decimals and OCR misspellings
-     of "total bill amount".
-  9. Amount extraction prefers the current month's charge from a utility bill's
-     readings table (e.g. COWD's "READINGS | CONSUMED | AMOUNT" row) over the
-     total including arrears.
- 10. Amount extraction treats "6, 255.86" as a single number (not two), and
-     rejects tiny fragments from the fallback pool when larger amounts exist.
-
 Public interface: scan_bill_image(file_obj, is_pdf=False) returns a dict with
 amount, due_date, merchant, raw_text, method, confidence.
+
+Amount rules, in order:
+  1. Bills that show ARREARS: the amount is this month's charge, i.e.
+     (amount due until due date) - arrears, cross-checked against the AMOUNT cell of the
+     readings table. If the two disagree the field is left empty (OCR misread something).
+  2. Otherwise the labelled total ("Total Amount Due", "Amount Due Until Due Date", ...).
+  3. If the bill's own label is there but its number is unreadable, leave the field empty
+     instead of guessing; the app then opens the edit form.
+  4. Last resort: the largest plausible amount that isn't on a subtotal/VAT/penalty line.
+
+Set BILLWISE_OCR_DEBUG_DIR=/some/folder to save what Tesseract sees on every pass.
 """
 
 import io
@@ -51,6 +46,8 @@ try:  # optional: robust date parsing fallback
     from dateutil import parser as date_parser
 except ImportError:  # pragma: no cover
     date_parser = None
+
+DEBUG_DIR = os.environ.get('BILLWISE_OCR_DEBUG_DIR')
 
 
 # ---- Tesseract path (Windows) ----
@@ -186,23 +183,22 @@ def _fix_digits(line):
 # AMOUNT EXTRACTION
 # ============================================================
 
-# 1,234.56 | 1234.56 | 12.00 | 6, 255.86 — always two decimals.
-# Allows an optional space before the decimals ("506. 71") or after a
-# comma ("6, 255.86"), both of which OCR inserts on some bills.
-AMOUNT_RE = re.compile(
-    r'(?<![\d.,\-])'
-    r'((?:\d{1,3}(?:,\s?\d{3})+|\d+)\.\s?\d{2})'
-    r'(?![\d%])'
-)
+# Strict: 1,234.56 | 1234.56 | 12.00   (always two decimals; skips % and negatives)
+AMOUNT_STRICT_RE = re.compile(r'(?<![\d.,\-])((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![\d%])')
+
+# Loose: also accepts the spaces OCR sometimes inserts ("6, 255.86", "506. 71").
+# Only used on lines that carry an amount label, because on other lines it can glue two
+# separate numbers together ("Qty 2, 100.00" -> 2100.00, "Sep 23, 2026. 15 days" -> 2026.15).
+AMOUNT_LOOSE_RE = re.compile(r'(?<![\d.,\-])((?:\d{1,3}(?:,\s?\d{3})+|\d+)\.\s?\d{2})(?![\d%])')
 
 # (priority, pattern). Higher priority wins.
 AMOUNT_KEYWORDS = [
-    # Highest priority — "amount due until due date" is what you actually pay.
+    # Highest priority: "amount due until due date" is what you actually pay.
     (110, re.compile(r'amount\s+due\s+until\s+due\s+date', re.I)),
     (108, re.compile(r'amount\s+due\s+(?:before|on)\s+due\s+date', re.I)),
     (105, re.compile(r'(?:total\s+)?amount\s+due\s+(?:until|before|on)\b', re.I)),
 
-    # Standard labeled totals.
+    # Standard labelled totals.
     (100, re.compile(r'total\s+amount\s+due|amount\s+due|total\s+due|net\s+amount\s+due', re.I)),
     (95, re.compile(r'(?:please\s+)?pay\s+(?:this\s+)?amount|amount\s+payable|balance\s+due|amount\s+to\s+pay', re.I)),
 
@@ -226,20 +222,22 @@ AMOUNT_NEGATIVE = re.compile(
 )
 
 # Never the amount to pay now, even if the line also says "amount due"
+# (e.g. "Amount due after due date", "Late payment charge")
 AMOUNT_HARD_NEGATIVE = re.compile(r'\b(after|late|penalt\w*|surcharge|overdue)\b', re.I)
 
-# A labelled match scoring at least this value is trusted even if the line
-# also contains a normally-excluded word (like "total").
 STRONG_AMOUNT_SCORE = 85
 
-# A fragment smaller than this is never the total (filters out partial reads
-# like "255.86" from "6, 255.86" when the comma is present).
+# Something that looks like an amount but has junk stuck to it, e.g. "?,165.56"
+GARBLED_AMOUNT = re.compile(r'[^\s\d]*\d[\d,]*\.\d{2}(?!\d)')
+
+# A fragment smaller than this is never the total in the last-resort fallback.
 MIN_PLAUSIBLE_TOTAL = 100.0
 
 
-def _amounts_in(line):
+def _amounts_in(line, loose=False):
+    regex = AMOUNT_LOOSE_RE if loose else AMOUNT_STRICT_RE
     results = []
-    for m in AMOUNT_RE.finditer(line):
+    for m in regex.finditer(line):
         raw = m.group(1).replace(',', '').replace(' ', '')
         try:
             results.append((m.start(), float(raw)))
@@ -257,14 +255,78 @@ def _best_keyword(low_line):
     return best
 
 
+def _labelled_amount(lines):
+    """
+    The amount next to the strongest label (same line, else the next two lines).
+    Returns ((score, value) or None, unreadable_score). unreadable_score is > 0 when a strong
+    label was found whose number was too garbled to read.
+    """
+    best = None
+    unreadable_score = 0
+
+    for i, line in enumerate(lines):
+        low = line.lower()
+        score, kw_end = _best_keyword(low)
+        if score == 0 or AMOUNT_HARD_NEGATIVE.search(low):
+            continue
+        if score < STRONG_AMOUNT_SCORE and AMOUNT_NEGATIVE.search(low):
+            continue
+
+        value = None
+        same_line = [(pos, v) for pos, v in _amounts_in(line, loose=True) if v > 0]
+        after_label = [v for pos, v in same_line if pos >= kw_end]
+        if after_label:
+            value = after_label[0]
+        elif same_line:
+            value = same_line[-1][1]
+        else:
+            if score >= STRONG_AMOUNT_SCORE and GARBLED_AMOUNT.search(line[kw_end:]):
+                unreadable_score = max(unreadable_score, score)
+            for nxt in lines[i + 1:i + 3]:
+                low_next = nxt.lower()
+                # stop at another label, or at a column heading like "AFTER DUE DATE"
+                if _best_keyword(low_next)[0] or AMOUNT_HARD_NEGATIVE.search(low_next):
+                    break
+                found = [v for _, v in _amounts_in(nxt, loose=True) if v > 0]
+                if found:
+                    value = found[0]
+                    break
+
+        if value is None:
+            continue
+        if best is None or score > best[0] or (score == best[0] and value > best[1]):
+            best = (score, value)
+
+    return best, unreadable_score
+
+
 # ------------------------------------------------------------
-# Current month's charge (from a utility bill's readings table)
+# Bills with arrears (utility bills): this month's charge
 # ------------------------------------------------------------
 
-CURRENT_ROW_HEADER_RE = re.compile(
-    r'\b(?:readings?|consumed|cubic\s*meter|present|this\s+month|current|amount)\b',
-    re.I,
-)
+# OCR-tolerant: "ARREARS", "APREARS", "ARREAR"
+ARREARS_RE = re.compile(r'\ba[pr]{1,2}ea?rs?\b', re.I)
+
+# Accepts a comma used as the decimal point ("255,86"), which OCR produces on some bills
+_MONEY_LOOSE = re.compile(r'(?<![\d.,])(\d{1,3}(?:,\d{3})*|\d+)[.,](\d{2})(?!\d)')
+
+
+def _arrears_amount(lines):
+    for line in lines:
+        m = ARREARS_RE.search(line.lower())
+        if not m:
+            continue
+        found = _MONEY_LOOSE.findall(line[m.end():])
+        if found:
+            whole, cents = found[-1]
+            value = float(f"{whole.replace(',', '')}.{cents}")
+            if value > 0:
+                return value
+    return None
+
+
+# The readings table's header row, e.g. "READINGS | Cubic Meter | AMOUNT (PESOS)"
+CURRENT_ROW_HEADER_RE = re.compile(r'\b(?:readings?|cubic\s*meters?|consumed)\b', re.I)
 
 CURRENT_ROW_EXCLUDE_RE = re.compile(
     r'\b(?:arrears?|previous|prev|total|amount\s+due|due\s+date|'
@@ -276,85 +338,54 @@ CURRENT_ROW_EXCLUDE_RE = re.compile(
 
 def extract_current_charge(text):
     """
-    Find this month's charge from a readings table (e.g. COWD).
+    The AMOUNT cell of a utility bill's readings table (this month's charge), or None.
 
-    Looks for a "readings / consumed / cubic meter" header, then scans the
-    next 1-3 lines for the first amount that isn't on an excluded line.
+    Finds a "readings / cubic meter / consumed" header, then takes the first amount on the
+    next 1-3 lines that aren't arrears/total/penalty lines.
     """
     lines = _lines(text)
 
     for i, line in enumerate(lines):
         low = line.lower()
-        if not CURRENT_ROW_HEADER_RE.search(low):
-            continue
-        if CURRENT_ROW_EXCLUDE_RE.search(low):
+        if not CURRENT_ROW_HEADER_RE.search(low) or CURRENT_ROW_EXCLUDE_RE.search(low):
             continue
 
         for j in range(i + 1, min(i + 4, len(lines))):
-            candidate_line = lines[j]
-            candidate_low = candidate_line.lower()
-
-            if CURRENT_ROW_EXCLUDE_RE.search(candidate_low):
+            if CURRENT_ROW_EXCLUDE_RE.search(lines[j].lower()):
                 continue
-
-            values = [v for _, v in _amounts_in(candidate_line) if v > 0]
+            values = [v for _, v in _amounts_in(lines[j]) if v > 0]
             if values:
-                return values[-1]
+                return values[0]  # leftmost: the table is the left block of the bill
 
     return None
 
 
 def extract_amount(text):
-    """
-    Find the amount to pay.
-
-    Priority:
-      1. The current month's charge from a readings table (utility bills).
-      2. A labeled total ("Amount Due Until Due Date", etc.).
-      3. The largest non-excluded amount on the page, if it's plausible.
-    """
-    current = extract_current_charge(text)
-    if current is not None:
-        return current
-
     lines = _lines(text)
-    best = None
+    labelled, unreadable_score = _labelled_amount(lines)
 
-    for i, line in enumerate(lines):
-        low = line.lower()
-        score, kw_end = _best_keyword(low)
-        if score == 0 or AMOUNT_HARD_NEGATIVE.search(low):
-            continue
-        if score < STRONG_AMOUNT_SCORE and AMOUNT_NEGATIVE.search(low):
-            continue
+    # 1. Bills with arrears: this month's charge, double-checked two ways.
+    arrears = _arrears_amount(lines)
+    if arrears:
+        total = labelled[1] if labelled else None
+        derived = round(total - arrears, 2) if total and total > arrears else None
+        table = extract_current_charge(text)
 
-        value = None
-        same_line = [(pos, v) for pos, v in _amounts_in(line) if v > 0]
-        after_label = [v for pos, v in same_line if pos >= kw_end]
-        if after_label:
-            value = after_label[0]
-        elif same_line:
-            value = same_line[-1][1]
-        else:
-            for nxt in lines[i + 1:i + 3]:
-                if _best_keyword(nxt.lower())[0]:
-                    break
-                found = [v for _, v in _amounts_in(nxt) if v > 0]
-                if found:
-                    value = found[0]
-                    break
+        if derived is not None and table is not None:
+            # Both readings exist: trust them only if they agree, else something was misread.
+            return derived if abs(derived - table) < 0.01 else None
+        if derived is not None:
+            return derived
+        if table is not None:
+            return table
 
-        if value is None:
-            continue
-        if best is None or score > best[0] or (score == best[0] and value > best[1]):
-            best = (score, value)
+    # 2/3. Labelled total; or the label was there but unreadable -> leave empty.
+    if unreadable_score and (labelled is None or unreadable_score > labelled[0]):
+        return None
+    if labelled:
+        return labelled[1]
 
-    if best:
-        return best[1]
-
-    # Fallback: pick the largest non-excluded amount, but only if it's
-    # plausibly a total (>= MIN_PLAUSIBLE_TOTAL). This rejects tiny fragments
-    # like "255.86" extracted from "6, 255.86" when the comma was misread.
+    # 4. Last resort: the largest plausible amount not on a subtotal/VAT/penalty line.
     everything, clean = [], []
     for line in lines:
         values = [v for _, v in _amounts_in(line) if v > 0]
@@ -364,7 +395,6 @@ def extract_amount(text):
 
     pool = [v for v in (clean or everything) if v >= MIN_PLAUSIBLE_TOTAL]
     if not pool:
-        # Nothing plausible; return the largest raw amount as a last resort
         pool = clean or everything
     return max(pool) if pool else None
 
@@ -386,7 +416,13 @@ DATE_DMY_TEXT = re.compile(rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{_MON}\.?,?\s+(\d{
 DATE_ISO = re.compile(r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b')
 DATE_NUMERIC = re.compile(r'\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})\b')
 
-DATE_NO_YEAR = re.compile(r'(?<![\d/.-])(\d{1,2})\s*[-/.]\s*(\d{1,2})(?![\d/.-])')
+# Year-less dates such as "9-23". Only "-" or "/" separators: a "." would turn amounts like
+# "9.25" (a water rate) into September 25. One stray trailing OCR digit ("9-235") is tolerated.
+SHORT_DATE = re.compile(r'(?<![\d/.\-:,])(\d{1,2})[-/](\d{1,2})\d?(?![\d/.\-])')
+MONTH_YEAR = re.compile(rf'\b{_MON}\.?\s+(20\d{{2}})\b', re.I)
+
+# "amount due until/after due date" are amount columns, not date labels
+_AMOUNT_PHRASE = re.compile(r'(?:after|until)\s+due\s+date')
 
 DUE_STRONG = re.compile(
     r'due\s*date|date\s+due|'
@@ -404,7 +440,7 @@ DATE_NEGATIVE = re.compile(
 
 LOOSE_DATE_RE = re.compile(
     r'('
-    r'\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*\d{2,4}'
+    r'(?<!\d)\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*\d{2,4}(?!\d)'
     r'|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{2,4}'
     r'|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+\d{2,4}'
     r')',
@@ -423,20 +459,8 @@ def _make_date(year, month, day):
         return None
 
 
-def _dates_no_year_in(line, year):
-    found = []
-    for m in DATE_NO_YEAR.finditer(line):
-        a, b = int(m.group(1)), int(m.group(2))
-        month, day = (b, a) if a > 12 and b <= 12 else (a, b)
-        if not (1 <= month <= 12 and 1 <= day <= 31):
-            continue
-        d = _make_date(year, month, day)
-        if d:
-            found.append((m.start(), d))
-    return found
-
-
-def _dates_in(line, assume_year=None):
+def _dates_in(line):
+    """All full dates (with a year) on a line as [(position, datetime)]."""
     found = []
 
     for m in DATE_MDY_TEXT.finditer(line):
@@ -456,25 +480,59 @@ def _dates_in(line, assume_year=None):
 
     for m in DATE_NUMERIC.finditer(line):
         a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        # Philippine bills are usually MM/DD/YYYY; flip only when that's impossible.
         month, day = (b, a) if a > 12 and b <= 12 else (a, b)
         d = _make_date(y, month, day)
         if d:
             found.append((m.start(), d))
 
-    if assume_year:
-        found.extend(_dates_no_year_in(line, assume_year))
-
     return sorted(found, key=lambda item: item[0])
 
 
-def _date_after_label(lines, pattern, assume_year=None):
+def _infer_year(text):
+    """(year, billing month) from a 'Sep 2026' style mention on the bill, else (this year, None)."""
+    m = MONTH_YEAR.search(text)
+    if m:
+        return int(m.group(2)), MONTH_MAP[m.group(1).lower()[:3]]
+    return datetime.now().year, None
+
+
+def _short_dates_in(line, year, bill_month=None):
+    """Year-less dates like '9-23' on a line, using the given year."""
+    found = []
+    for m in SHORT_DATE.finditer(line):
+        month, day_text = int(m.group(1)), m.group(2)
+        day = int(day_text)
+        if day > 31 and len(day_text) == 2:  # "35" was really "3" + a stray digit
+            day = int(day_text[0])
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        y = year + 1 if bill_month and month < bill_month - 6 else year  # due early next year
+        d = _make_date(y, month, day)
+        if d:
+            found.append((m.start(), d))
+    return found
+
+
+def _mask_amount_phrases(low):
+    return _AMOUNT_PHRASE.sub(lambda m: ' ' * len(m.group(0)), low)
+
+
+def _date_after_label(lines, pattern, short=None):
+    """
+    First date belonging to a line that matches `pattern` (same line, else the next two).
+    With `short=(year, bill_month)` it reads year-less dates like '9-23' instead.
+    """
+    def find(s):
+        return _dates_in(s) if short is None else _short_dates_in(s, *short)
+
     for i, line in enumerate(lines):
-        low = line.lower()
+        low = _mask_amount_phrases(line.lower())
         match = pattern.search(low)
         if not match:
             continue
 
-        same = _dates_in(line, assume_year=assume_year)
+        same = find(line)
         after = [d for pos, d in same if pos >= match.end()]
         if after:
             return after[0]
@@ -482,9 +540,11 @@ def _date_after_label(lines, pattern, assume_year=None):
             return same[-1][1]
 
         for nxt in lines[i + 1:i + 3]:
-            dates = [d for _, d in _dates_in(nxt, assume_year=assume_year)]
+            dates = [d for _, d in find(nxt)]
             if not dates:
                 continue
+            # Header row like "Billing Date   Due Date" followed by a row of values:
+            # pick the value in the same column position as the due-date label.
             labels = sorted(
                 [(m.start(), 'due') for m in DUE_STRONG.finditer(low)]
                 + [(m.start(), 'other') for m in DATE_NEGATIVE.finditer(low)]
@@ -492,21 +552,25 @@ def _date_after_label(lines, pattern, assume_year=None):
             if len(labels) > 1 and len(labels) == len(dates):
                 due_index = next(idx for idx, (_, kind) in enumerate(labels) if kind == 'due')
                 return dates[due_index]
-            return dates[0]
+            # A row of values under the headings holds the reading/billing date AND the due
+            # date; the due date is always the latest of them.
+            return max(dates)
     return None
 
 
 def _parse_with_dateutil(lines):
+    """Spaced or odd separators the regexes miss ("09 / 15 / 2026"); skips billing/reading lines."""
     if date_parser is None:
         return None
 
     priority, other = [], []
     for line in lines:
         low = line.lower()
+        if DATE_NEGATIVE.search(low):
+            continue
         for m in LOOSE_DATE_RE.finditer(line):
-            raw = m.group(1)
             try:
-                parsed = date_parser.parse(raw, fuzzy=False)
+                parsed = date_parser.parse(m.group(1), fuzzy=False)
             except (ValueError, OverflowError):
                 continue
             (priority if DUE_WEAK.search(low) else other).append(parsed)
@@ -521,12 +585,22 @@ def _parse_with_dateutil(lines):
 
 
 def extract_due_date(text):
+    """
+    Due date as YYYY-MM-DD.
+
+    1. Date next to "Due Date" / "Pay on or before" etc., then next to any "due" line.
+       Year-less dates ("9-23") are read too, with the year taken from e.g. "Sep 2026".
+    2. dateutil on dates the regexes missed (spaced separators).
+    3. Among dates not on billing/statement/reading lines: earliest future, else latest.
+    """
     lines = _lines(text)
-    now = datetime.now()
+    short = _infer_year(text)
 
     chosen = (
-        _date_after_label(lines, DUE_STRONG, assume_year=now.year)
-        or _date_after_label(lines, DUE_WEAK, assume_year=now.year)
+        _date_after_label(lines, DUE_STRONG)
+        or _date_after_label(lines, DUE_STRONG, short)
+        or _date_after_label(lines, DUE_WEAK)
+        or _date_after_label(lines, DUE_WEAK, short)
     )
     if chosen:
         return chosen.strftime('%Y-%m-%d')
@@ -537,7 +611,7 @@ def extract_due_date(text):
 
     clean, everything = [], []
     for line in lines:
-        dates = [d for _, d in _dates_in(line, assume_year=now.year)]
+        dates = [d for _, d in _dates_in(line)]
         everything.extend(dates)
         if not DATE_NEGATIVE.search(line.lower()):
             clean.extend(dates)
@@ -546,6 +620,7 @@ def extract_due_date(text):
     if not pool:
         return None
 
+    now = datetime.now()
     future = [d for d in pool if d >= now]
     chosen = min(future) if future else max(pool)
     return chosen.strftime('%Y-%m-%d')
@@ -571,9 +646,12 @@ COMPANY_HINT_RE = re.compile(
 
 MERCHANT_SKIP_RE = re.compile(
     r'bill\s+to|customer|account\s*(?:no|number|#)|invoice\s*(?:no|number|#)|receipt\s*(?:no|number|#)|'
-    r'tel\b|phone|www\.|http|@|address|attn|total|amount|date',
+    r'tel\b|phone|www\.|http|@|address|attn|total|amount|date|powered\s+by|thank\s+you',
     re.I,
 )
+
+# "Receipt from Juan's Cafe", "Invoice from Acme Hosting"
+FROM_RE = re.compile(r'^(?:receipt|invoice|statement|payment)\s+from\s+(.+)$', re.I)
 
 REAL_WORD_RE = re.compile(r'[A-Za-z]{4,}')
 
@@ -587,12 +665,13 @@ ADDRESS_HINT_RE = re.compile(
     re.I,
 )
 
+# Short and specific on purpose: generic words like "power" or "internet" also appear in
+# "Powered by ..." and "Internet banking" lines.
 FUZZY_BILLER_HINTS = (
     'water district', 'water districts', 'waterworks',
-    'electric', 'electricity', 'power',
-    'internet', 'broadband', 'telecom', 'communications',
+    'electric', 'telecom', 'communications',
     'maynilad', 'meralco', 'pldt', 'globe', 'converge', 'cepalco', 'moresco',
-    'manila water', 'cagayan', 'misamis',
+    'manila water', 'cagayan',
 )
 
 
@@ -601,16 +680,35 @@ def _looks_like_biller(line):
     return any(h in low for h in FUZZY_BILLER_HINTS)
 
 
+def _clean_merchant(line):
+    """Strip OCR junk: stray symbols, and a mis-read mixed-case first word on an ALL CAPS name."""
+    line = re.sub(r"[^\w&.,'()\- ]", ' ', line)
+    tokens = line.split()
+    letters = [c for c in line if c.isalpha()]
+    mostly_upper = letters and sum(c.isupper() for c in letters) / len(letters) > 0.6
+    if mostly_upper:
+        # "Sgas CAG ORO CITY WATER DISTRICT": drop leading tokens that aren't ALL CAPS
+        while len(tokens) > 2 and not tokens[0].isupper():
+            tokens.pop(0)
+    cleaned = ' '.join(tokens).strip(" ,-").lstrip(". ")  # keep a trailing period ("Inc.")
+    return cleaned or line.strip()
+
+
 def extract_merchant(text):
     lines = _lines(text)
     if not lines:
         return None
 
+    for line in lines[:8]:
+        m = FROM_RE.match(line.strip())
+        if m and len(m.group(1).strip()) >= 3:
+            return _clean_merchant(m.group(1))
+
     for line in lines[:15]:
         if len(line) > 80 or MERCHANT_SKIP_RE.search(line):
             continue
         if COMPANY_HINT_RE.search(line):
-            return line
+            return _clean_merchant(line)
 
     for line in lines[:15]:
         if len(line) > 90 or len(line) < 6:
@@ -622,8 +720,8 @@ def extract_merchant(text):
         if _looks_like_biller(line):
             m = REAL_WORD_RE.search(line)
             if m and m.start() > 0:
-                return line[m.start():]
-            return line
+                return _clean_merchant(line[m.start():])
+            return _clean_merchant(line)
 
     for line in lines[:10]:
         clean = line.strip(" :.-_")
@@ -655,7 +753,7 @@ def extract_merchant(text):
         if not REAL_WORD_RE.search(clean):
             continue
 
-        return clean
+        return _clean_merchant(clean)
 
     return None
 
@@ -722,10 +820,17 @@ def _ocr_best(image):
     ]
 
     best = None
-    for make in attempts:
+    for n, make in enumerate(attempts, start=1):
         prepared, psm = make()
         text, confidence = _ocr(prepared, psm)
         fields = _extract_fields(text)
+
+        if DEBUG_DIR:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            stem = os.path.join(DEBUG_DIR, f'pass{n}_psm{psm}')
+            prepared.save(stem + '.png')
+            with open(stem + '.txt', 'w', encoding='utf-8') as fh:
+                fh.write(f'confidence={confidence:.1f}\nfields={fields}\n\n{text}')
 
         score = confidence
         score += 15 if fields['amount'] is not None else 0
