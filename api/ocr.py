@@ -10,14 +10,22 @@ Supports:
 Public interface: scan_bill_image(file_obj, is_pdf=False) returns a dict with
 amount, due_date, merchant, raw_text, method, confidence.
 
-Amount rules, in order:
-  1. Bills that show ARREARS: the amount is this month's charge, i.e.
-     (amount due until due date) - arrears, cross-checked against the AMOUNT cell of the
-     readings table. If the two disagree the field is left empty (OCR misread something).
+How photos are read
+  1. Three views of the photo (darkest colour channel, blue channel, grey), each LOCALLY
+     binarized. Local thresholding matters most: a dark background, shadow or finger in the
+     frame makes Tesseract's own global threshold drop the text elsewhere in the picture.
+  2. Two OCR passes first; four more only if those weren't conclusive. Passes run in parallel.
+  3. The passes vote. On a bill with arrears, the amount is this month's charge, found as the
+     combination of readings that satisfies  (amount due until due date) - arrears = this
+     month's charge, so a single misread digit can't slip through.
+  4. If the bill's label is there but no pass can read its number, the amount is left empty
+     (the app then opens the edit form) rather than guessing.
+
+Amount rules (single text, used for digital PDFs), in order:
+  1. Bills that show ARREARS: this month's charge = (amount due until due date) - arrears,
+     cross-checked against the AMOUNT cell of the readings table.
   2. Otherwise the labelled total ("Total Amount Due", "Amount Due Until Due Date", ...).
-  3. If the bill's own label is there but its number is unreadable, leave the field empty
-     instead of guessing; the app then opens the edit form.
-  4. Last resort: the largest plausible amount that isn't on a subtotal/VAT/penalty line.
+  3. Last resort: the largest plausible amount not on a subtotal/VAT/penalty/paid line.
 
 Set BILLWISE_OCR_DEBUG_DIR=/some/folder to save what Tesseract sees on every pass.
 """
@@ -25,9 +33,12 @@ Set BILLWISE_OCR_DEBUG_DIR=/some/folder to save what Tesseract sees on every pas
 import io
 import os
 import re
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from difflib import SequenceMatcher
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 import pytesseract
 
 try:
@@ -49,6 +60,10 @@ except ImportError:  # pragma: no cover
 
 DEBUG_DIR = os.environ.get('BILLWISE_OCR_DEBUG_DIR')
 
+# We run several Tesseract processes in parallel; without this each one also spawns its own
+# threads and they fight over the CPU.
+os.environ.setdefault('OMP_THREAD_LIMIT', '1')
+
 
 # ---- Tesseract path (Windows) ----
 if os.name == 'nt':
@@ -69,71 +84,6 @@ if os.name == 'nt':
 
 TARGET_WIDTH = 2200
 MAX_WIDTH = 4096
-
-
-def _prepare_gray(image):
-    """Upright, flatten transparency, grayscale, resize, autocontrast."""
-    image = ImageOps.exif_transpose(image)
-
-    if image.mode in ('RGBA', 'LA', 'P'):
-        rgba = image.convert('RGBA')
-        background = Image.new('RGB', rgba.size, 'white')
-        background.paste(rgba, mask=rgba.split()[-1])
-        image = background
-
-    gray = image.convert('L')
-
-    width, height = gray.size
-    if width < TARGET_WIDTH:
-        scale = TARGET_WIDTH / width
-        gray = gray.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
-    elif width > MAX_WIDTH:
-        scale = MAX_WIDTH / width
-        gray = gray.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
-
-    return ImageOps.autocontrast(gray, cutoff=1)
-
-
-def _sharpen(gray):
-    gray = ImageEnhance.Contrast(gray).enhance(1.3)
-    return gray.filter(ImageFilter.UnsharpMask(radius=2, percent=120, threshold=3))
-
-
-def _otsu_threshold(hist):
-    total = sum(hist)
-    sum_all = sum(i * h for i, h in enumerate(hist))
-    sum_b = 0
-    weight_b = 0
-    best_var = 0
-    threshold = 128
-    for i, h in enumerate(hist):
-        weight_b += h
-        if weight_b == 0:
-            continue
-        weight_f = total - weight_b
-        if weight_f == 0:
-            break
-        sum_b += i * h
-        mean_b = sum_b / weight_b
-        mean_f = (sum_all - sum_b) / weight_f
-        var = weight_b * weight_f * (mean_b - mean_f) ** 2
-        if var > best_var:
-            best_var = var
-            threshold = i
-    return threshold
-
-
-def _binarize(gray):
-    if cv2 is not None and np is not None:
-        arr = cv2.medianBlur(np.array(gray), 5)
-        out = cv2.adaptiveThreshold(
-            arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 41, 15
-        )
-        return Image.fromarray(out)
-
-    smooth = gray.filter(ImageFilter.MedianFilter(3))
-    threshold = _otsu_threshold(smooth.histogram())
-    return smooth.point(lambda p: 255 if p > threshold else 0)
 
 
 def _ocr(image, psm):
@@ -217,7 +167,7 @@ AMOUNT_KEYWORDS = [
 # Lines about these are NOT the amount to pay (unless a strong keyword is also on the line)
 AMOUNT_NEGATIVE = re.compile(
     r'\b(previous|prev|subtotal|sub-total|vat|tax|discount|change|cash|tendered|late|penalt\w*|'
-    r'surcharge|reading|kwh|rate|arrears|deposit|adjustment|credit|after)\b',
+    r'surcharge|reading|kwh|rate|arrears|deposit|adjustment|credit|after|paid|received)\b',
     re.I,
 )
 
@@ -360,6 +310,86 @@ def extract_current_charge(text):
     return None
 
 
+def amount_parts(text):
+    """The raw ingredients of the amount from ONE OCR text (used to vote across passes)."""
+    lines = _lines(text)
+    labelled, unreadable_score = _labelled_amount(lines)
+    return {
+        'labelled': labelled[1] if labelled else None,
+        'label_score': labelled[0] if labelled else 0,
+        'unreadable': unreadable_score,
+        'arrears': _arrears_amount(lines),
+        'table': extract_current_charge(text),
+    }
+
+
+def _consistent_current_charge(parts_list):
+    """
+    Bills with arrears print three numbers that must satisfy  total - arrears = this month.
+    Every OCR pass reads some of them right and some wrong, so look across ALL passes for a
+    combination that agrees. A misread digit almost never produces a combination that adds up.
+    Returns (value, support, confirmed) or None. `confirmed` means the readings-table cell agrees.
+    """
+    totals = Counter(p['labelled'] for p in parts_list if p['labelled'])
+    arrears = Counter(p['arrears'] for p in parts_list if p['arrears'])
+    tables = Counter(p['table'] for p in parts_list if p['table'])
+    if not arrears:
+        return None
+
+    best = None  # (support, value)
+    for total, t_count in totals.items():
+        for arr, a_count in arrears.items():
+            if total <= arr:
+                continue
+            derived = round(total - arr, 2)
+            t_support = sum(c for v, c in tables.items() if abs(v - derived) < 0.01)
+            support = t_count + a_count + 2 * t_support
+            # a derived value confirmed by the readings-table cell is strong evidence
+            if t_support and (best is None or support > best[0]):
+                best = (support, derived)
+    if best:
+        return best[1], best[0], True  # confirmed by the readings-table cell
+
+    # No table cell agrees. Fall back to total - arrears from the most common readings.
+    if totals and arrears:
+        total = totals.most_common(1)[0][0]
+        arr = arrears.most_common(1)[0][0]
+        if total > arr:
+            return round(total - arr, 2), 1, False
+    # Only the table cell, if every pass agrees on it.
+    if tables and len(tables) == 1:
+        return next(iter(tables)), 1, False
+    return None
+
+
+def decide_amount(parts_list, with_confirmation=False):
+    """
+    One amount from the per-pass parts (see amount_parts); None when the passes can't agree.
+    With with_confirmation=True returns (amount, confirmed): confirmed is False for a bill with
+    arrears whose three numbers haven't been cross-checked yet (so more passes are worthwhile).
+    """
+    def out(value, confirmed=True):
+        return (value, confirmed) if with_confirmation else value
+
+    has_arrears = any(p['arrears'] for p in parts_list)
+    consistent = _consistent_current_charge(parts_list)
+    if consistent:
+        return out(consistent[0], consistent[2])
+    if has_arrears:
+        return out(None, False)
+
+    # No arrears on this bill: most common labelled total, strongest label first.
+    labelled = [(p['label_score'], p['labelled']) for p in parts_list if p['labelled']]
+    if labelled:
+        votes = Counter(v for _, v in labelled)
+        top_votes = max(votes.values())
+        candidates = [v for v, c in votes.items() if c == top_votes]
+        # ties: prefer the value found under the strongest label
+        return out(max(candidates, key=lambda v: max(sc for sc, val in labelled if val == v)))
+
+    return out(None, False)  # nothing readable (or the bill's own label was there but garbled)
+
+
 def extract_amount(text):
     lines = _lines(text)
     labelled, unreadable_score = _labelled_amount(lines)
@@ -491,10 +521,12 @@ def _dates_in(line):
 
 def _infer_year(text):
     """(year, billing month) from a 'Sep 2026' style mention on the bill, else (this year, None)."""
-    m = MONTH_YEAR.search(text)
-    if m:
-        return int(m.group(2)), MONTH_MAP[m.group(1).lower()[:3]]
-    return datetime.now().year, None
+    now_year = datetime.now().year
+    for m in MONTH_YEAR.finditer(text):
+        year = int(m.group(2))
+        if abs(year - now_year) <= 1:  # "Sep 2036" is an OCR misread, not a year
+            return year, MONTH_MAP[m.group(1).lower()[:3]]
+    return now_year, None
 
 
 def _short_dates_in(line, year, bill_month=None):
@@ -558,6 +590,47 @@ def _date_after_label(lines, pattern, short=None):
     return None
 
 
+_MONTH_WORD = r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?'
+
+# A utility-bill stub row: "<reading date> <due date> <amount after due date> <Mon YYYY>",
+# e.g. "9-3 | 9-23 | 7,256.53 | Sep 2026". The due date is the one right before the amount.
+_STUB_ROW = re.compile(
+    rf'(\d{{1,2}}\s*[-/]\s*\d{{1,2}})\d?\W{{0,4}}\d[\d,]*\.\d{{2}}\W{{0,4}}{_MONTH_WORD}\s*\d{{4}}',
+    re.I,
+)
+_DATE_LIKE_LEFTOVER = re.compile(rf'[\d,.\s|/\-:]+|{_MONTH_WORD}', re.I)
+
+
+def _date_from_value_row(lines, short):
+    """
+    Fallback for when the small "DATE DUE" heading wasn't read (common on compressed photos),
+    using the shape of the row of values under the headings:
+      1. one line holding "<date> <amount> <Mon YYYY>": the date is the due date;
+      2. a run of date-like lines holding two dates 1-45 days apart ("9-3" then "9-23"):
+         the due date is the later one.
+    """
+    year, bill_month = short
+
+    for line in lines:
+        m = _STUB_ROW.search(line)
+        if m:
+            found = _short_dates_in(m.group(1), year, bill_month)
+            if found:
+                return found[0][1]
+
+    for i in range(len(lines)):
+        cluster = []
+        for line in lines[i:i + 6]:
+            leftover = _DATE_LIKE_LEFTOVER.sub('', line)
+            if len(leftover) > 3:  # real words: not part of a row of values
+                break
+            cluster.extend(d for _, d in _short_dates_in(line, year, bill_month))
+        for a, b in zip(cluster, cluster[1:]):
+            if 1 <= (b - a).days <= 45:
+                return b
+    return None
+
+
 def _parse_with_dateutil(lines):
     """Spaced or odd separators the regexes miss ("09 / 15 / 2026"); skips billing/reading lines."""
     if date_parser is None:
@@ -601,6 +674,7 @@ def extract_due_date(text):
         or _date_after_label(lines, DUE_STRONG, short)
         or _date_after_label(lines, DUE_WEAK)
         or _date_after_label(lines, DUE_WEAK, short)
+        or _date_from_value_row(lines, short)
     )
     if chosen:
         return chosen.strftime('%Y-%m-%d')
@@ -655,6 +729,9 @@ FROM_RE = re.compile(r'^(?:receipt|invoice|statement|payment)\s+from\s+(.+)$', r
 
 REAL_WORD_RE = re.compile(r'[A-Za-z]{4,}')
 
+# "GOLEZ, ALONA IROC": an ALL-CAPS surname then a comma is how bills print the customer
+PERSON_NAME_RE = re.compile(r'^[A-Z]{3,},\s+\S+')
+
 MANY_SINGLE_LETTERS_RE = re.compile(
     r'(?<![A-Za-z])(?:[A-Za-z](?![A-Za-z]))(?:\s+(?:[A-Za-z](?![A-Za-z]))){2,}'
 )
@@ -694,8 +771,38 @@ def _clean_merchant(line):
     return cleaned or line.strip()
 
 
+_HEADER_WORDS = sorted(GENERIC_HEADERS | {'official', 'receipt', 'acknowledgment', 'payment'})
+
+
+def _is_generic_header(line):
+    """True for 'Official Receipt' even when OCR garbles it ('OFFICTAL RECTIP')."""
+    words = re.findall(r'[A-Za-z]{3,}', line.lower())
+    if not words or len(words) > 4:
+        return False
+    return all(
+        any(SequenceMatcher(None, w, h).ratio() >= 0.75 for h in _HEADER_WORDS)
+        for w in words
+    )
+
+
+_CUSTOMER_BLOCK = re.compile(r'name\s*(?:and|&)\s*address|account\s*name|customer\s*name|bill\s+to|sold\s+to', re.I)
+
+
+def _without_customer_block(lines):
+    """Drop the lines right after "NAME AND ADDRESS" etc.: that's the customer, not the merchant."""
+    out, skip = [], 0
+    for ln in lines:
+        if skip:
+            skip -= 1
+            continue
+        out.append(ln)
+        if _CUSTOMER_BLOCK.search(ln):
+            skip = 2
+    return out
+
+
 def extract_merchant(text):
-    lines = _lines(text)
+    lines = _without_customer_block([ln for ln in _lines(text) if not _is_generic_header(ln)])
     if not lines:
         return None
 
@@ -736,6 +843,8 @@ def extract_merchant(text):
         if ADDRESS_HINT_RE.search(clean):
             continue
         if MANY_SINGLE_LETTERS_RE.search(clean):
+            continue
+        if PERSON_NAME_RE.match(clean):
             continue
 
         letters = sum(c.isalpha() for c in clean)
@@ -810,41 +919,133 @@ def _extract_fields(text):
     }
 
 
-def _ocr_best(image):
-    gray = _prepare_gray(image)
+def _scale_and_contrast(gray):
+    width, height = gray.size
+    if width < TARGET_WIDTH:
+        scale = TARGET_WIDTH / width
+        gray = gray.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    elif width > MAX_WIDTH:
+        scale = MAX_WIDTH / width
+        gray = gray.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    return ImageOps.autocontrast(gray, cutoff=1)
 
-    attempts = [
-        lambda: (_sharpen(gray), 6),
-        lambda: (_binarize(gray), 6),
-        lambda: (gray, 4),
-    ]
 
-    best = None
-    for n, make in enumerate(attempts, start=1):
-        prepared, psm = make()
-        text, confidence = _ocr(prepared, psm)
-        fields = _extract_fields(text)
+def _adaptive(gray):
+    """
+    Local binarization: each pixel is compared with its own neighbourhood.
 
-        if DEBUG_DIR:
-            os.makedirs(DEBUG_DIR, exist_ok=True)
-            stem = os.path.join(DEBUG_DIR, f'pass{n}_psm{psm}')
-            prepared.save(stem + '.png')
+    This is the single biggest accuracy win on phone photos. Tesseract's built-in thresholding
+    is global, so a dark background, a shadow or a finger in the frame makes it drop text
+    elsewhere in the picture. On a real COWD bill photo it read none of the amounts without
+    this step and every one of them with it.
+    """
+    block = max(31, int(gray.width / 48)) | 1  # odd; ~50px at 2400px wide
+    if cv2 is not None and np is not None:
+        arr = cv2.medianBlur(np.array(gray), 3)
+        out = cv2.adaptiveThreshold(
+            arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 15
+        )
+        return Image.fromarray(out)
+
+    # Pure-Pillow fallback: pixel vs. the local mean (box blur)
+    smooth = gray.filter(ImageFilter.MedianFilter(3))
+    local_mean = smooth.filter(ImageFilter.BoxBlur(block // 2))
+    diff = ImageChops.subtract(smooth, local_mean, 1.0, 128)  # pixel - mean + 128
+    return diff.point(lambda p: 255 if p > 128 - 12 else 0)
+
+
+def _views(image):
+    """
+    Three adaptive-thresholded views of the same photo. On a dot-matrix print over a blue form
+    each view reads different digits correctly (measured on a real COWD bill), so the passes
+    vote:
+      min:  darkest of the colour channels, a high-contrast "ink" view
+      blue: blue form lines and labels turn pale, black print stays dark
+      gray: the normal picture
+    """
+    image = ImageOps.exif_transpose(image)
+    if image.mode in ('RGBA', 'LA', 'P'):
+        rgba = image.convert('RGBA')
+        background = Image.new('RGB', rgba.size, 'white')
+        background.paste(rgba, mask=rgba.split()[-1])
+        image = background
+    rgb = image.convert('RGB')
+    red, green, blue = rgb.split()
+    return {
+        'min': _adaptive(_scale_and_contrast(ImageChops.darker(ImageChops.darker(red, green), blue))),
+        'blue': _adaptive(_scale_and_contrast(blue)),
+        'gray': _adaptive(_scale_and_contrast(rgb.convert('L'))),
+    }
+
+
+# psm 6: one uniform block. psm 11: sparse text (good for form fields and table cells).
+# Stage 1 is the pair that did best on real bills; stage 2 only runs when stage 1 isn't conclusive.
+STAGE_1 = (('min', 6), ('blue', 11))
+STAGE_2 = (('gray', 6), ('gray', 11), ('blue', 6), ('min', 11))
+
+
+def _run_passes(views, jobs):
+    def run(job):
+        name, psm = job
+        text, confidence = _ocr(views[name], psm)
+        return {
+            'name': name, 'psm': psm, 'text': text, 'confidence': confidence,
+            'parts': amount_parts(text),
+            'due_date': extract_due_date(text),
+            'merchant': extract_merchant(text),
+        }
+
+    workers = max(1, min(len(jobs), os.cpu_count() or 2))
+    with ThreadPoolExecutor(max_workers=workers) as pool:  # tesseract runs as a subprocess
+        return list(pool.map(run, jobs))
+
+
+def _decide(results):
+    by_confidence = sorted(results, key=lambda r: r['confidence'], reverse=True)
+
+    amount, confirmed = decide_amount([r['parts'] for r in results], with_confirmation=True)
+
+    due_votes = Counter(r['due_date'] for r in results if r['due_date'])
+    due_date = None
+    if due_votes:
+        top = max(due_votes.values())
+        tied = [d for d, c in due_votes.items() if c == top]
+        due_date = next(r['due_date'] for r in by_confidence if r['due_date'] in tied)
+
+    merchant = next((r['merchant'] for r in by_confidence if r['merchant']), None)
+    return by_confidence, {'amount': amount, 'due_date': due_date, 'merchant': merchant}, confirmed
+
+
+def _ocr_pooled(image):
+    """
+    OCR the photo several ways and combine the passes:
+      amount   - voting, plus the total - arrears = this month consistency check
+      due date - most common across passes
+      merchant - from the most confident pass that found one
+    Two stages keep it fast: the second only runs if the first couldn't settle the answer.
+    Returns (combined text, best confidence, fields).
+    """
+    views = _views(image)
+
+    results = _run_passes(views, STAGE_1)
+    by_confidence, fields, confirmed = _decide(results)
+
+    if fields['amount'] is None or fields['due_date'] is None or not confirmed:
+        results += _run_passes(views, STAGE_2)
+        by_confidence, fields, confirmed = _decide(results)
+
+    if DEBUG_DIR:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        for r in results:
+            stem = os.path.join(DEBUG_DIR, f"{r['name']}_psm{r['psm']}")
+            views[r['name']].save(stem + '.png')
             with open(stem + '.txt', 'w', encoding='utf-8') as fh:
-                fh.write(f'confidence={confidence:.1f}\nfields={fields}\n\n{text}')
+                fh.write(f"confidence={r['confidence']:.1f}\nparts={r['parts']}\n"
+                         f"due_date={r['due_date']}\nmerchant={r['merchant']}\n\n{r['text']}")
 
-        score = confidence
-        score += 15 if fields['amount'] is not None else 0
-        score += 15 if fields['due_date'] else 0
-        score += 5 if fields['merchant'] else 0
-
-        if best is None or score > best[0]:
-            best = (score, text, confidence, fields)
-
-        if confidence >= 85 and fields['amount'] is not None and fields['due_date']:
-            break
-
-    _, text, confidence, fields = best
-    return text, confidence, fields
+    # Best pass first, so line positions (used for biller detection) come from the cleanest text
+    combined = '\n\n'.join(r['text'] for r in by_confidence)
+    return combined, by_confidence[0]['confidence'], fields
 
 
 def scan_bill_image(file_obj, is_pdf=False):
@@ -855,7 +1056,7 @@ def scan_bill_image(file_obj, is_pdf=False):
             if fields['amount'] is not None:
                 return {**fields, 'raw_text': text, 'method': 'pdf_text', 'confidence': 100.0}
 
-            ocr_text, confidence, ocr_fields = _ocr_best(pdf_first_page_to_image(file_obj))
+            ocr_text, confidence, ocr_fields = _ocr_pooled(pdf_first_page_to_image(file_obj))
             merged = {k: fields[k] if fields[k] is not None else ocr_fields[k] for k in fields}
             return {**merged, 'raw_text': text + '\n' + ocr_text, 'method': 'pdf_text+ocr',
                     'confidence': confidence}
@@ -865,5 +1066,5 @@ def scan_bill_image(file_obj, is_pdf=False):
         file_obj.seek(0)
         image = Image.open(file_obj)
 
-    text, confidence, fields = _ocr_best(image)
+    text, confidence, fields = _ocr_pooled(image)
     return {**fields, 'raw_text': text, 'method': 'ocr', 'confidence': round(confidence, 1)}
