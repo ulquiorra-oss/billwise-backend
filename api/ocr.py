@@ -8,18 +8,26 @@ Supports:
     scanned PDFs are rendered with PyMuPDF and OCR'd (no Poppler needed).
 
 Public interface: scan_bill_image(file_obj, is_pdf=False) returns a dict with
-amount, due_date, merchant, raw_text, method, confidence.
+amount, due_date, merchant, raw_text, method, confidence and (for photos) amount_candidates.
 
 How photos are read
   1. Three views of the photo (darkest colour channel, blue channel, grey), each LOCALLY
      binarized. Local thresholding matters most: a dark background, shadow or finger in the
      frame makes Tesseract's own global threshold drop the text elsewhere in the picture.
   2. Two OCR passes first; four more only if those weren't conclusive. Passes run in parallel.
-  3. The passes vote. On a bill with arrears, the amount is this month's charge, found as the
+  3. Text rows are rebuilt from word positions (with the page tilt removed), so a label and its
+     value share one line and a number is never paired with the wrong row's label. This is what
+     stops CEPALCO's VAT figure being read as the amount.
+  4. The passes vote. On a bill with arrears, the amount is this month's charge, found as the
      combination of readings that satisfies  (amount due until due date) - arrears = this
-     month's charge, so a single misread digit can't slip through.
-  4. If the bill's label is there but no pass can read its number, the amount is left empty
-     (the app then opens the edit form) rather than guessing.
+     month's charge. On a CEPALCO-style slip, "total bill amount" and "total payable amount" are
+     the same number, so their readings are pooled and voted digit by digit.
+  5. If the vote can't pick a clear winner, each labelled amount is re-read from a TIGHT crop of
+     the original photo with digits-only OCR (this fixes dot-matrix 5s that whole-page OCR keeps
+     misreading), and those re-reads vote too.
+  6. If it's still undecided the amount is left empty and the best guesses come back in
+     `amount_candidates` (e.g. [930.39, 530.39]), so the app can offer them. It never returns a
+     number it isn't sure of.
 
 Amount rules (single text, used for digital PDFs), in order:
   1. Bills that show ARREARS: this month's charge = (amount due until due date) - arrears,
@@ -86,13 +94,64 @@ TARGET_WIDTH = 2200
 MAX_WIDTH = 4096
 
 
+def _rows_from_words(words):
+    """
+    Rebuild text rows from word positions: a label and its value end up on ONE line even when
+    Tesseract emitted them as separate lines (typical for right-aligned amounts), and a number
+    can no longer be paired with the label of a different row (the "always shows VAT" bug).
+
+    Photos are rarely perfectly level, so row heights are measured after removing the page's
+    tilt (the median baseline slope of Tesseract's own lines).
+    """
+    if not words:
+        return []
+
+    by_line = {}
+    for w in words:
+        by_line.setdefault(w['line'], []).append(w)
+    slopes = []
+    for ws in by_line.values():
+        if len(ws) < 4:
+            continue
+        xs = [w['cx'] for w in ws]
+        ys = [w['cy'] for w in ws]
+        mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+        var = sum((x - mean_x) ** 2 for x in xs)
+        if var > 0:
+            slopes.append(sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var)
+    slope = 0.0
+    if slopes:
+        slopes.sort()
+        slope = max(-0.1, min(0.1, slopes[len(slopes) // 2]))  # clamp to ~ +/-6 degrees
+
+    heights = sorted(w['h'] for w in words if len(w['text']) >= 2) or sorted(w['h'] for w in words)
+    tol = 0.6 * heights[len(heights) // 2]
+
+    for w in words:
+        w['y'] = w['cy'] - slope * w['cx']
+    words = sorted(words, key=lambda w: w['y'])
+
+    rows, current, current_y = [], [], None
+    for w in words:
+        if current and abs(w['y'] - current_y) > tol:
+            rows.append(current)
+            current = []
+        current.append(w)
+        current_y = sum(x['y'] for x in current) / len(current)
+    if current:
+        rows.append(current)
+
+    return [sorted(row, key=lambda x: x['left']) for row in rows]
+
+
 def _ocr(image, psm):
+    """Run Tesseract; return (text, one row per line, mean word confidence 0-100)."""
     config = f'--oem 3 --psm {psm} -c preserve_interword_spaces=1'
     data = pytesseract.image_to_data(
         image, lang='eng', config=config, output_type=pytesseract.Output.DICT
     )
 
-    lines = {}
+    words = []
     confidences = []
     for i, word in enumerate(data['text']):
         word = word.strip()
@@ -102,14 +161,19 @@ def _ocr(image, psm):
             conf = float(data['conf'][i])
         except (TypeError, ValueError):
             conf = -1
-        key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
-        lines.setdefault(key, []).append(word)
+        left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+        words.append({
+            'text': word, 'left': left, 'top': top, 'w': width, 'h': height,
+            'cx': left + width / 2, 'cy': top + height / 2,
+            'line': (data['block_num'][i], data['par_num'][i], data['line_num'][i]),
+        })
         if conf >= 0:
             confidences.append(conf)
 
-    text = '\n'.join(' '.join(words) for _, words in sorted(lines.items()))
+    rows = _rows_from_words(words)
+    text = '\n'.join(' '.join(w['text'] for w in row) for row in rows)
     mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    return text, mean_conf
+    return text, mean_conf, rows
 
 
 # ============================================================
@@ -126,6 +190,7 @@ _DIGIT_FIX = str.maketrans('OoIl', '0011')
 
 
 def _fix_digits(line):
+    line = re.sub(r'§(?=\s?\d)', '5', line)  # "§30.39" -> "530.39" (dot-matrix 5 misread)
     return _FIXABLE_NUMBER.sub(lambda m: m.group(0).translate(_DIGIT_FIX), line)
 
 
@@ -139,7 +204,9 @@ AMOUNT_STRICT_RE = re.compile(r'(?<![\d.,\-])((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})
 # Loose: also accepts the spaces OCR sometimes inserts ("6, 255.86", "506. 71").
 # Only used on lines that carry an amount label, because on other lines it can glue two
 # separate numbers together ("Qty 2, 100.00" -> 2100.00, "Sep 23, 2026. 15 days" -> 2026.15).
-AMOUNT_LOOSE_RE = re.compile(r'(?<![\d.,\-])((?:\d{1,3}(?:,\s?\d{3})+|\d+)\.\s?\d{2})(?![\d%])')
+# A leading '-' is allowed here: on a label line it is the dashed rule or OCR junk ("-*-530.39"), not
+# a negative amount.
+AMOUNT_LOOSE_RE = re.compile(r'(?<![\d.,])((?:\d{1,3}(?:,\s?\d{3})+|\d+)\.\s?\d{2})(?![\d%])')
 
 # (priority, pattern). Higher priority wins.
 AMOUNT_KEYWORDS = [
@@ -159,7 +226,8 @@ AMOUNT_KEYWORDS = [
 
     # Lower-priority fallbacks.
     (80, re.compile(r'grand\s+total|total\s+amount|total\s+payable', re.I)),
-    (60, re.compile(r'current\s+(?:charges|bill)|bill\s+amount', re.I)),
+    (86, re.compile(r'bill\s+amount', re.I)),
+    (60, re.compile(r'current\s+(?:charges|bill)', re.I)),
     (50, re.compile(r'\btotal\b', re.I)),
     (45, re.compile(r'\bamount\b', re.I)),
 ]
@@ -205,17 +273,61 @@ def _best_keyword(low_line):
     return best
 
 
+# Label words OCR commonly garbles by ONE letter: "AHOUNT", "AMQUNT", "TCTAL", "PAVABLE"
+_LABEL_VOCAB = ('total', 'amount', 'payable', 'balance')
+
+
+def _repair_labels(low):
+    """Fix one-letter slips in label words. Same length, so character positions don't move."""
+    def fix(m):
+        word = m.group(0)
+        if len(word) < 5:
+            return word
+        for v in _LABEL_VOCAB:
+            if len(v) == len(word) and word != v and sum(a != b for a, b in zip(word, v)) == 1:
+                return v
+        return word
+    return re.sub(r'[a-z]+', fix, low)
+
+
+_CURRENCY_WORDS = re.compile(r'\b(?:php|pesos?|p)\b', re.I)
+
+
+def _is_value_line(line):
+    """A line holding just a number (and maybe a currency mark / separator), not words."""
+    return sum(c.isalpha() for c in _CURRENCY_WORDS.sub('', line)) <= 2
+
+
+def _label_class(score):
+    """
+    payable: what you owe now ("total payable", "amount due" ...).
+    bill:    CEPALCO's "total bill amount", which equals the payable amount when the non-bill
+             charges below it are 0.00.
+    other:   weaker labels ("total", "current charges", "amount" ...).
+    """
+    if score >= 90:
+        return 'payable'
+    if score in (85, 86, 88):
+        return 'bill'
+    return 'other'
+
+
 def _labelled_amount(lines):
     """
-    The amount next to the strongest label (same line, else the next two lines).
-    Returns ((score, value) or None, unreadable_score). unreadable_score is > 0 when a strong
-    label was found whose number was too garbled to read.
+    The amount next to each amount label.
+    Returns (best (score, value) or None, unreadable_score, candidates [(score, value, class)]).
+
+    A value is taken from the label's own line. It is taken from the line below only when the
+    label stands alone and the next line is just a number. In particular the search never
+    walks past a line of words, so the value of a different row (VAT!) can't be picked up, and
+    a label whose own number is garbled stays empty instead of borrowing its neighbour's.
     """
     best = None
     unreadable_score = 0
+    candidates = []
 
     for i, line in enumerate(lines):
-        low = line.lower()
+        low = _repair_labels(line.lower())
         score, kw_end = _best_keyword(low)
         if score == 0 or AMOUNT_HARD_NEGATIVE.search(low):
             continue
@@ -225,15 +337,20 @@ def _labelled_amount(lines):
         value = None
         same_line = [(pos, v) for pos, v in _amounts_in(line, loose=True) if v > 0]
         after_label = [v for pos, v in same_line if pos >= kw_end]
+        label_alone = not re.sub(r'[\W_]+', '', line[kw_end:])
+
         if after_label:
             value = after_label[0]
         elif same_line:
             value = same_line[-1][1]
-        else:
-            if score >= STRONG_AMOUNT_SCORE and GARBLED_AMOUNT.search(line[kw_end:]):
+        elif not label_alone:
+            # something follows the label but it isn't a readable number: its own value is
+            # garbled. Don't borrow the next row's number.
+            if score >= STRONG_AMOUNT_SCORE:
                 unreadable_score = max(unreadable_score, score)
+        else:
             for nxt in lines[i + 1:i + 3]:
-                low_next = nxt.lower()
+                low_next = _repair_labels(nxt.lower())
                 # stop at another label, or at a column heading like "AFTER DUE DATE"
                 if _best_keyword(low_next)[0] or AMOUNT_HARD_NEGATIVE.search(low_next):
                     break
@@ -241,13 +358,18 @@ def _labelled_amount(lines):
                 if found:
                     value = found[0]
                     break
+                if not _is_value_line(nxt):  # a line of words ends the search
+                    break
+            if value is None and score >= STRONG_AMOUNT_SCORE and GARBLED_AMOUNT.search(line[kw_end:]):
+                unreadable_score = max(unreadable_score, score)
 
         if value is None:
             continue
+        candidates.append((score, value, _label_class(score)))
         if best is None or score > best[0] or (score == best[0] and value > best[1]):
             best = (score, value)
 
-    return best, unreadable_score
+    return best, unreadable_score, candidates
 
 
 # ------------------------------------------------------------
@@ -310,14 +432,124 @@ def extract_current_charge(text):
     return None
 
 
+# CEPALCO slips list "NONBILL RELATED CHARGES" and "DEPOSIT ADJUSTMENT INSTALLMENT DUE" between the
+# bill amount and the total payable. When those are all 0.00, bill amount == total payable.
+_NONBILL_LINE = re.compile(r'.onbill|deposit\s+adjustment|installment', re.I)
+
+
+def _nonbill_charges_nonzero(lines):
+    """True/False for this pass's reading of the non-bill lines; None when none were read."""
+    seen = False
+    for line in lines:
+        if _NONBILL_LINE.search(line):
+            seen = True
+            if any(v > 0 for _, v in _amounts_in(line, loose=True)):
+                return True
+    return False if seen else None
+
+
+def _digit_consensus(values):
+    """
+    Vote digit by digit across several readings of the same number.
+
+    On dot-matrix print one glyph (a 5) is misread as 9, 3 or § in different passes, so
+    530.39 comes back as 530.39, 539.39, 930.39 and 339.39. Each position still has a clear
+    majority, and the majority spells the right number. Returns (value, solid) where solid
+    means every digit had at least two votes and beat the runner-up by at least two. A bare
+    1-vote lead is not enough: on this font a repeated misread can easily collect that many.
+    """
+    strings = [f'{v:.2f}' for v in values]
+    modal_len = Counter(len(x) for x in strings).most_common(1)[0][0]
+    group = [x for x in strings if len(x) == modal_len]
+    digits, solid = [], True
+    for i in range(modal_len):
+        ranked = Counter(x[i] for x in group).most_common(2)
+        top = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0
+        if top[1] < 2 or top[1] - runner_up < 2:
+            solid = False
+        digits.append(top[0])
+    try:
+        return float(''.join(digits)), solid
+    except ValueError:
+        return None, False
+
+
+def _amount_pool(parts_list):
+    """
+    The label readings that count, as [(score, value)].
+
+    Uses the strongest kind of label that any pass read. "Total bill amount" readings are pooled
+    with "total payable" ones (they are the same number on a CEPALCO slip) unless the non-bill
+    charges are non-zero, in which case only the payable amount counts.
+    """
+    # one pass mis-merging two rows must not switch pooling off: go by the majority of passes
+    states = [p.get('nonbill_nonzero') for p in parts_list if p.get('nonbill_nonzero') is not None]
+    nonbill = states.count(True) > states.count(False)
+    every = [(score, value, cls) for p in parts_list for score, value, cls in p.get('candidates', [])
+             if score >= 50]
+
+    pool = [(sc, v) for sc, v, cls in every if cls == 'payable' or (cls == 'bill' and not nonbill)]
+    if not pool:
+        pool = [(sc, v) for sc, v, cls in every if cls == 'other']
+    return pool
+
+
+def _vote_amount(parts_list):
+    """The amount from every label reading in every pass. Returns (value, confirmed)."""
+    pool = _amount_pool(parts_list)
+    if not pool:
+        return None, False
+
+    counts = Counter(v for _, v in pool)
+    ranked = counts.most_common()
+    top_value, top_count = ranked[0]
+    runner_up_count = ranked[1][1] if len(ranked) > 1 else 0
+
+    if len(ranked) == 1:
+        return top_value, top_count >= 2
+    if top_count >= runner_up_count + 2:
+        return top_value, True
+
+    consensus, solid = _digit_consensus([v for _, v in pool])
+    if consensus is not None and solid:
+        return consensus, True
+
+    # Two different readings from a single pass, e.g. "Current Charges" and "Total Amount Due":
+    # the strongest label wins (that is how a single text is read).
+    if len(parts_list) == 1 and len({sc for sc, _ in pool}) > 1:
+        return max(pool, key=lambda t: t[0])[1], False
+    return None, False  # the passes disagree and nothing is a clear winner: don't guess
+
+
+def amount_candidates(parts_list, limit=3):
+    """
+    The readings worth offering the user when the amount could not be decided, best first:
+    the digit-by-digit consensus, then the most frequently read values.
+    """
+    pool = _amount_pool(parts_list)
+    if not pool:
+        return []
+    out = []
+    consensus, _ = _digit_consensus([v for _, v in pool])
+    if consensus is not None:
+        out.append(consensus)
+    for value, _ in Counter(v for _, v in pool).most_common():
+        if value not in out:
+            out.append(value)
+    return out[:limit]
+
+
 def amount_parts(text):
     """The raw ingredients of the amount from ONE OCR text (used to vote across passes)."""
     lines = _lines(text)
-    labelled, unreadable_score = _labelled_amount(lines)
+    labelled, unreadable_score, candidates = _labelled_amount(lines)
     return {
         'labelled': labelled[1] if labelled else None,
         'label_score': labelled[0] if labelled else 0,
         'unreadable': unreadable_score,
+        'candidates': candidates,
+        'nonbill_nonzero': _nonbill_charges_nonzero(lines),
         'arrears': _arrears_amount(lines),
         'table': extract_current_charge(text),
     }
@@ -330,9 +562,9 @@ def _consistent_current_charge(parts_list):
     combination that agrees. A misread digit almost never produces a combination that adds up.
     Returns (value, support, confirmed) or None. `confirmed` means the readings-table cell agrees.
     """
-    totals = Counter(p['labelled'] for p in parts_list if p['labelled'])
-    arrears = Counter(p['arrears'] for p in parts_list if p['arrears'])
-    tables = Counter(p['table'] for p in parts_list if p['table'])
+    totals = Counter(p.get('labelled') for p in parts_list if p.get('labelled'))
+    arrears = Counter(p.get('arrears') for p in parts_list if p.get('arrears'))
+    tables = Counter(p.get('table') for p in parts_list if p.get('table'))
     if not arrears:
         return None
 
@@ -371,28 +603,21 @@ def decide_amount(parts_list, with_confirmation=False):
     def out(value, confirmed=True):
         return (value, confirmed) if with_confirmation else value
 
-    has_arrears = any(p['arrears'] for p in parts_list)
+    has_arrears = any(p.get('arrears') for p in parts_list)
     consistent = _consistent_current_charge(parts_list)
     if consistent:
         return out(consistent[0], consistent[2])
     if has_arrears:
         return out(None, False)
 
-    # No arrears on this bill: most common labelled total, strongest label first.
-    labelled = [(p['label_score'], p['labelled']) for p in parts_list if p['labelled']]
-    if labelled:
-        votes = Counter(v for _, v in labelled)
-        top_votes = max(votes.values())
-        candidates = [v for v, c in votes.items() if c == top_votes]
-        # ties: prefer the value found under the strongest label
-        return out(max(candidates, key=lambda v: max(sc for sc, val in labelled if val == v)))
-
-    return out(None, False)  # nothing readable (or the bill's own label was there but garbled)
+    # No arrears on this bill: vote across every label reading in every pass.
+    value, confirmed = _vote_amount(parts_list)
+    return out(value, confirmed)
 
 
 def extract_amount(text):
     lines = _lines(text)
-    labelled, unreadable_score = _labelled_amount(lines)
+    labelled, unreadable_score, _ = _labelled_amount(lines)
 
     # 1. Bills with arrears: this month's charge, double-checked two ways.
     arrears = _arrears_amount(lines)
@@ -410,10 +635,10 @@ def extract_amount(text):
             return table
 
     # 2/3. Labelled total; or the label was there but unreadable -> leave empty.
-    if unreadable_score and (labelled is None or unreadable_score > labelled[0]):
-        return None
     if labelled:
         return labelled[1]
+    if unreadable_score:
+        return None
 
     # 4. Last resort: the largest plausible amount not on a subtotal/VAT/penalty line.
     everything, clean = [], []
@@ -978,6 +1203,96 @@ def _views(image):
     }
 
 
+# ------------------------------------------------------------
+# Re-reading numbers from a tight crop
+# ------------------------------------------------------------
+# Whole-page OCR misreads one glyph of some dot-matrix fonts (a 5 comes back as 9, 3 or 8) the
+# same way in several passes, so voting alone can't fix it. An isolated number read as a single
+# word, from the ORIGINAL photo, is much cleaner: on the real CEPALCO slip it reads the 5
+# correctly in most attempts. Only used when the normal passes couldn't decide.
+
+_DIGITS_ONLY = '-c tessedit_char_whitelist=0123456789.,'
+
+
+def _digit_heavy(token):
+    return len(token) >= 2 and sum(c.isdigit() for c in token) / len(token) >= 0.6
+
+
+def _amount_regions(results):
+    """Where each labelled amount sits on the page: [(score, (x0, y0, x1, y1))], de-duplicated."""
+    found = []
+    for r in results:
+        for row in r['rows']:
+            low = _repair_labels(' '.join(w['text'] for w in row).lower())
+            score, _ = _best_keyword(low)
+            if score < 85 or AMOUNT_HARD_NEGATIVE.search(low):
+                continue
+            nums = [w for w in row if _digit_heavy(w['text'])]
+            if nums:
+                found.append((score, (min(w['left'] for w in nums), min(w['top'] for w in nums),
+                                      max(w['left'] + w['w'] for w in nums),
+                                      max(w['top'] + w['h'] for w in nums))))
+    unique = []
+    for score, box in found:
+        cx, cy, h = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[3] - box[1]
+        if not any(abs(cx - ux) < 0.5 * max(box[2] - box[0], uw) and abs(cy - uy) < 0.8 * max(h, uh)
+                   for _, ((ux0, uy0, ux1, uy1)) in unique
+                   for ux, uy, uw, uh in [((ux0 + ux1) / 2, (uy0 + uy1) / 2, ux1 - ux0, uy1 - uy0)]):
+            unique.append((score, box))
+    return unique
+
+
+def _reread_region(original, view_width, box):
+    """
+    Digits-only reads of one amount, from the original photo, in several scales/colourings.
+
+    Keep the crop TIGHT: with a 10% margin the real CEPALCO number read correctly 16 times out of
+    16; with a 30% margin the neighbouring rules and text drown it ("50.98").
+    """
+    k = original.width / view_width
+    x0, y0, x1, y1 = (v * k for v in box)
+
+    reads = []
+    for pad_x_frac, pad_y_frac in ((0.10, 0.10), (0.15, 0.20)):
+        pad_x, pad_y = (x1 - x0) * pad_x_frac + 6, (y1 - y0) * pad_y_frac + 4
+        crop = original.crop((max(0, int(x0 - pad_x)), max(0, int(y0 - pad_y)),
+                              min(original.width, int(x1 + pad_x)), min(original.height, int(y1 + pad_y))))
+        red, green, blue = crop.split()
+        channels = (ImageChops.darker(ImageChops.darker(red, green), blue), crop.convert('L'))
+
+        for scale in (2.5, 3.5):
+            for channel in channels:
+                g = ImageOps.autocontrast(
+                    channel.resize((int(channel.width * scale), int(channel.height * scale)), Image.LANCZOS),
+                    cutoff=1)
+                tries = [g]
+                if cv2 is not None and np is not None:
+                    _, otsu = cv2.threshold(np.array(g), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    tries.append(Image.fromarray(otsu))
+                for im in tries:
+                    text = pytesseract.image_to_string(
+                        ImageOps.expand(im, border=30, fill=255), lang='eng',
+                        config=f'--oem 3 --psm 8 {_DIGITS_ONLY}').strip().replace(' ', '').replace(',', '.')
+                    if re.fullmatch(r'\d{1,4}\.\d{2}', text):
+                        reads.append(float(text))
+    return reads
+
+
+def _reread_amounts(original, views, results):
+    """Extra label readings [(score, value, class)] obtained by re-reading each amount's crop."""
+    regions = _amount_regions(results)
+    if not regions:
+        return []
+    view_width = next(iter(views.values())).width
+    workers = max(1, min(len(regions), os.cpu_count() or 2))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        all_reads = list(pool.map(lambda r: _reread_region(original, view_width, r[1]), regions))
+    # every individual re-read is one vote: a crop's own tie (say 4 reads of ...39 and 4 of ...38)
+    # is settled by the page-wide readings, and the many re-reads settle the leading digit
+    return [(score, value, _label_class(score))
+            for (score, _), reads in zip(regions, all_reads) for value in reads]
+
+
 # psm 6: one uniform block. psm 11: sparse text (good for form fields and table cells).
 # Stage 1 is the pair that did best on real bills; stage 2 only runs when stage 1 isn't conclusive.
 STAGE_1 = (('min', 6), ('blue', 11))
@@ -987,9 +1302,9 @@ STAGE_2 = (('gray', 6), ('gray', 11), ('blue', 6), ('min', 11))
 def _run_passes(views, jobs):
     def run(job):
         name, psm = job
-        text, confidence = _ocr(views[name], psm)
+        text, confidence, rows = _ocr(views[name], psm)
         return {
-            'name': name, 'psm': psm, 'text': text, 'confidence': confidence,
+            'name': name, 'psm': psm, 'text': text, 'confidence': confidence, 'rows': rows,
             'parts': amount_parts(text),
             'due_date': extract_due_date(text),
             'merchant': extract_merchant(text),
@@ -1013,7 +1328,14 @@ def _decide(results):
         due_date = next(r['due_date'] for r in by_confidence if r['due_date'] in tied)
 
     merchant = next((r['merchant'] for r in by_confidence if r['merchant']), None)
-    return by_confidence, {'amount': amount, 'due_date': due_date, 'merchant': merchant}, confirmed
+    fields = {
+        'amount': amount,
+        'due_date': due_date,
+        'merchant': merchant,
+        # best guesses to offer the user when `amount` is None (e.g. [530.39, 930.39])
+        'amount_candidates': amount_candidates([r['parts'] for r in results]) if amount is None else [],
+    }
+    return by_confidence, fields, confirmed
 
 
 def _ocr_pooled(image):
@@ -1033,6 +1355,18 @@ def _ocr_pooled(image):
     if fields['amount'] is None or fields['due_date'] is None or not confirmed:
         results += _run_passes(views, STAGE_2)
         by_confidence, fields, confirmed = _decide(results)
+
+    # Still undecided on a bill without arrears: re-read the amounts from tight crops.
+    parts_list = [r['parts'] for r in results]
+    if (fields['amount'] is None and not any(p.get('arrears') for p in parts_list)
+            and amount_candidates(parts_list)):
+        original = ImageOps.exif_transpose(image).convert('RGB')
+        extra = _reread_amounts(original, views, results)
+        if extra:
+            parts_list.append({'candidates': extra, 'nonbill_nonzero': None})
+            amount, _ = decide_amount(parts_list, with_confirmation=True)
+            fields['amount'] = amount
+            fields['amount_candidates'] = amount_candidates(parts_list) if amount is None else []
 
     if DEBUG_DIR:
         os.makedirs(DEBUG_DIR, exist_ok=True)
