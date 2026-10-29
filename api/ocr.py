@@ -66,6 +66,17 @@ try:  # optional: robust date parsing fallback
 except ImportError:  # pragma: no cover
     date_parser = None
 
+try:  # optional: Claude vision reader (see llm_reader.py); off unless BILLWISE_LLM_MODE is set
+    from . import llm_reader
+except ImportError:  # run outside the Django package, or the file isn't there
+    try:
+        import llm_reader
+    except ImportError:  # pragma: no cover
+        llm_reader = None
+
+if llm_reader is not None:
+    print('[BillWise]', llm_reader.status(), flush=True)  # shows in the server terminal at startup
+
 DEBUG_DIR = os.environ.get('BILLWISE_OCR_DEBUG_DIR')
 
 # We run several Tesseract processes in parallel; without this each one also spawns its own
@@ -1382,7 +1393,30 @@ def _ocr_pooled(image):
     return combined, by_confidence[0]['confidence'], fields
 
 
+def _llm_mode():
+    return llm_reader.mode() if llm_reader else 'off'
+
+
+def _merge_llm(ocr_result, llm_result):
+    """Tesseract's result, with Claude filling only what Tesseract left empty."""
+    merged = dict(ocr_result)
+    for key in ('amount', 'due_date', 'merchant'):
+        if merged.get(key) is None and llm_result.get(key) is not None:
+            merged[key] = llm_result[key]
+    if merged.get('amount') is not None:
+        merged['amount_candidates'] = []
+    elif llm_result.get('amount_candidates'):
+        merged['amount_candidates'] = llm_result['amount_candidates']
+    for key in ('arrears', 'months_delinquent', 'disconnection_notice', 'amount_after_due_date', 'vat'):
+        merged[key] = llm_result.get(key)
+    merged['raw_text'] = (merged.get('raw_text') or '') + '\n' + (llm_result.get('raw_text') or '')
+    merged['method'] = 'ocr+llm'
+    return merged
+
+
 def scan_bill_image(file_obj, is_pdf=False):
+    llm_mode = _llm_mode()
+
     if is_pdf:
         text = _pdf_text(file_obj)
         if _has_real_text(text):
@@ -1400,5 +1434,19 @@ def scan_bill_image(file_obj, is_pdf=False):
         file_obj.seek(0)
         image = Image.open(file_obj)
 
+    # Claude first: the most reliable reader for dot-matrix prints on messy photos.
+    if llm_mode == 'always':
+        llm_result = llm_reader.read_bill(image)
+        if llm_result:
+            return llm_result  # on any failure it returns None and we fall through to Tesseract
+
     text, confidence, fields = _ocr_pooled(image)
-    return {**fields, 'raw_text': text, 'method': 'ocr', 'confidence': round(confidence, 1)}
+    result = {**fields, 'raw_text': text, 'method': 'ocr', 'confidence': round(confidence, 1)}
+
+    # Tesseract couldn't settle the amount or the due date: ask Claude for the missing pieces.
+    if llm_mode == 'fallback' and (result['amount'] is None or result['due_date'] is None):
+        llm_result = llm_reader.read_bill(image)
+        if llm_result:
+            result = _merge_llm(result, llm_result)
+
+    return result
