@@ -942,7 +942,10 @@ def verify_google_otp(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def resend_google_otp(request):
-    """Resend a code with cooldown and resend limits."""
+    """
+    Resend a code with cooldown and resend limits.
+    Works for Google, Login, and Registration OTPs.
+    """
 
     challenge_id = request.data.get('challenge_id')
 
@@ -961,13 +964,19 @@ def resend_google_otp(request):
         )
 
     with transaction.atomic():
-        try:
-            challenge = (
-                GoogleOTPVerification.objects
-                .select_for_update()
-                .get(challenge_id=challenge_uuid)
-            )
-        except GoogleOTPVerification.DoesNotExist:
+        # 1. Try to find a Google Challenge first
+        challenge = GoogleOTPVerification.objects.select_for_update().filter(challenge_id=challenge_uuid).first()
+        is_google = True
+        email = challenge.email if challenge else None
+        
+        # 2. If not Google, try the Email (Login/Register) Challenge
+        if not challenge:
+            challenge = EmailOTPVerification.objects.select_for_update().select_related('household').filter(challenge_id=challenge_uuid).first()
+            is_google = False
+            if challenge:
+                email = challenge.household.email
+
+        if not challenge:
             return Response(
                 {'error': 'Invalid verification challenge'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -983,17 +992,18 @@ def resend_google_otp(request):
 
         if challenge.expires_at <= now:
             return Response(
-                {'error': 'Challenge expired. Sign in with Google again.'},
+                {'error': 'Challenge expired. Please start over.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         if challenge.attempts >= 5:
             return Response(
-                {'error': 'Too many attempts. Sign in with Google again.'},
+                {'error': 'Too many attempts. Please start over.'},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
-        if challenge.resend_count >= 3:
+        # Only Google challenges have a resend_count field
+        if is_google and challenge.resend_count >= 3:
             return Response(
                 {'error': 'Resend limit reached. Sign in with Google again.'},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -1022,12 +1032,12 @@ def resend_google_otp(request):
                     'It expires in 5 minutes. Only the latest code is valid.'
                 ),
                 from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[challenge.email],
+                recipient_list=[email],
                 fail_silently=False,
             )
         except Exception:
             logger.exception(
-                'Google OTP resend email failed for challenge_id=%s',
+                'OTP resend email failed for challenge_id=%s',
                 challenge.challenge_id,
             )
             sent = 0
@@ -1045,15 +1055,25 @@ def resend_google_otp(request):
         challenge.otp_hash = make_password(otp)
         challenge.expires_at = now + timedelta(minutes=5)
         challenge.last_sent_at = now
-        challenge.resend_count += 1
-        challenge.save(
-            update_fields=[
-                'otp_hash',
-                'expires_at',
-                'last_sent_at',
-                'resend_count',
-            ]
-        )
+        
+        if is_google:
+            challenge.resend_count += 1
+            challenge.save(
+                update_fields=[
+                    'otp_hash',
+                    'expires_at',
+                    'last_sent_at',
+                    'resend_count',
+                ]
+            )
+        else:
+            challenge.save(
+                update_fields=[
+                    'otp_hash',
+                    'expires_at',
+                    'last_sent_at',
+                ]
+            )
 
     return Response(
         {
