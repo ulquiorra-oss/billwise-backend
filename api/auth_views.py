@@ -104,10 +104,9 @@ def register(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    household = None
-
     try:
         with transaction.atomic():
+            # 1. Create the user
             household = Household.objects.create(
                 first_name=first_name,
                 last_name=last_name,
@@ -126,6 +125,7 @@ def register(request):
                 survival_threshold_max=0,
             )
 
+            # 2. Create the OTP
             otp = f'{secrets.randbelow(1_000_000):06d}'
             now = timezone.now()
 
@@ -137,6 +137,7 @@ def register(request):
                 last_sent_at=now,
             )
 
+            # 3. Send the email
             try:
                 sent = send_mail(
                     subject='Verify your BillWise email',
@@ -150,59 +151,28 @@ def register(request):
                     recipient_list=[email],
                     fail_silently=False,
                 )
-
+                if sent != 1:
+                    raise Exception("Failed to send email")
             except Exception as exc:
-                logger.exception(
-                    'Registration verification email failed for household_id=%s',
-                    household.household_id,
-                )
-                raise RuntimeError(
-                    'Verification email could not be sent'
-                ) from exc
+                logger.exception("Email sending failed during registration.")
+                # If email fails, raise an error so the transaction rolls back
+                raise RuntimeError(f"Email failed: {str(exc)}")
 
-            if sent != 1:
-                logger.error(
-                    'Registration verification email returned %s for household_id=%s',
-                    sent,
-                    household.household_id,
-                )
-                raise RuntimeError(
-                    'Verification email could not be sent'
-                )
-
-    except RuntimeError:
-        logger.exception('Registration aborted before email send')
-
+    except RuntimeError as e:
+        # This catches the email failure
         return Response(
-            {
-                'error': (
-                    'We could not send your verification email. '
-                    'Please try registering again.'
-                )
-            },
+            {'error': str(e)},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-
-    except Exception:
-        logger.exception('Registration failed unexpectedly')
-
-        # The atomic transaction rolls back failed account creation.
-        # Do not refresh or delete a potentially rolled-back instance.
-        if Household.objects.filter(email__iexact=email).exists():
-            return Response(
-                {'error': 'Email already registered'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+    except Exception as e:
+        # This catches ANY other database error and tells us exactly what it is
+        logger.exception("Registration database failed.")
         return Response(
-            {
-                'error': (
-                    'Could not create the account. Please try again.'
-                )
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {'error': f'Database Error: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # 4. Success response
     local, separator, domain = email.partition('@')
     masked_email = f'{local[:1]}***@{domain}' if separator else '***'
 
