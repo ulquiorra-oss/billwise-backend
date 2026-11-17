@@ -7,6 +7,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from datetime import timedelta
 
+import pymysql
+pymysql.install_as_MySQLdb()
+
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -19,7 +22,7 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = os.getenv('DEBUG') == 'True'
 
 # Allow all hosts for now, or read from env
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['*', 'billwise-backend-production.up.railway.app']
 
 
 # Application definition
@@ -42,7 +45,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware', # ✅ WhiteNoise
+    'whitenoise.middleware.WhiteNoiseMiddleware', # ✅ WhiteNoise for static files
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -79,7 +82,7 @@ DATABASES = {
         'USER': os.getenv('DB_USER'),
         'PASSWORD': os.getenv('DB_PASSWORD'),
         'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
+        'PORT': os.getenv('DB_PORT', '3306'),
     }
 }
 
