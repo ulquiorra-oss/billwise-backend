@@ -10,6 +10,7 @@ from datetime import timedelta
 import pymysql
 pymysql.install_as_MySQLdb()
 
+# Loads a local ".env" file (kept out of Git) into the environment, so secrets never go in this file.
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -21,7 +22,6 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG') == 'True'
 
-# Allow all hosts for now, or read from env
 ALLOWED_HOSTS = ['*', 'billwise-backend-production.up.railway.app']
 
 
@@ -45,7 +45,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware', # ✅ WhiteNoise for static files
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -133,24 +133,21 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Email settings
-EMAIL_BACKEND = os.getenv(
-    'EMAIL_BACKEND',
-    'django.core.mail.backends.console.EmailBackend',
-)
+# ============================================================
+# Email settings: Google Apps Script mailer (works on Railway)
+# ============================================================
+# Railway blocks outbound SMTP, so OTP emails go out over HTTPS through a small Google Apps Script
+# web app (see Code.gs). Every existing send_mail(...) call keeps working unchanged.
+#
+# Set these two as environment variables, in Railway's Variables tab and in your local ".env" file.
+# NEVER type their values into this file:
+#   APPS_SCRIPT_MAIL_URL     the web app URL, ends in /exec
+#   APPS_SCRIPT_MAIL_SECRET  the same value as the MAIL_SECRET script property
+EMAIL_BACKEND = 'api.email_backend.AppsScriptEmailBackend'
 
-DEFAULT_FROM_EMAIL = os.getenv(
-    'DEFAULT_FROM_EMAIL',
-    'no-reply@billwise.local',
-)
-
-EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost')
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', '25'))
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'False').lower() == 'true'
-EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() == 'true'
-EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '10'))
+# Informational only: Apps Script always sends from the Gmail account that owns the script.
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'BillWise <no-reply@billwise.app>')
+# ============================================================
 
 
 # JWT Settings
@@ -158,7 +155,7 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': False, 
+    'BLACKLIST_AFTER_ROTATION': False,
     'USER_ID_FIELD': 'household_id',
     'USER_ID_CLAIM': 'household_id',
 }
@@ -166,3 +163,12 @@ SIMPLE_JWT = {
 # Google OAuth
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
+
+# ============================================================
+# Other environment variables this project reads (set in ".env" locally, Railway Variables online)
+# ============================================================
+#   SECRET_KEY, DEBUG, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+#   APPS_SCRIPT_MAIL_URL, APPS_SCRIPT_MAIL_SECRET          (email, above)
+#   ANTHROPIC_API_KEY, BILLWISE_LLM_MODE, BILLWISE_LLM_MODEL   (Claude bill reader, see llm_reader.py)
+#   BILLWISE_OCR_DEBUG_DIR                                  (optional, saves OCR debug images)

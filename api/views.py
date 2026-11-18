@@ -1,5 +1,8 @@
 from datetime import date
 from decimal import Decimal
+import os
+import requests
+import logging
 
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated
@@ -31,6 +34,45 @@ from .serializers import (
     BudgetItemSerializer,
     BudgetAllocationSerializer,
 )
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# EMAIL HELPER (GOOGLE APPS SCRIPT)
+# ============================================================
+
+def send_otp_email_via_google(to_email, otp_code, subject="Your BillWise Code"):
+    """Send OTP via Google Apps Script to bypass Railway SMTP block."""
+    web_app_url = os.environ.get('GOOGLE_SCRIPT_URL')
+    secret_token = os.environ.get('GOOGLE_SCRIPT_TOKEN')
+    
+    if not web_app_url or not secret_token:
+        logger.error("Google Script URL or Token is missing in environment variables.")
+        return False
+        
+    body = f"Hi,\n\nYour BillWise verification code is: {otp_code}\n\nThis code expires in 5 minutes."
+    
+    payload = {
+        "token": secret_token,
+        "to": to_email,
+        "subject": subject,
+        "body": body
+    }
+    
+    try:
+        response = requests.post(web_app_url, json=payload, timeout=15)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("success"):
+            return True
+        else:
+            logger.error(f"Google Script error: {result.get('error')}")
+            return False
+            
+    except Exception as e:
+        logger.exception("Failed to send email via Google Script")
+        return False
 
 
 # ============================================================
