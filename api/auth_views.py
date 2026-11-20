@@ -12,15 +12,102 @@ import os
 import secrets
 import uuid
 import hashlib
+import ipaddress
 import logging
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db import IntegrityError, transaction
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Abuse protection for the endpoints that send an email
+# ============================================================
+# OTP emails go out through a Google Apps Script mailer, and a normal Gmail account is limited to
+# about 100 recipients per day. Without limits anyone could call register / google_login in a loop,
+# use up the whole day's quota so real users never get their codes, and send junk to strangers from
+# your Gmail address. Two protections:
+#   1. A per-IP limit on the endpoints that can be called without being logged in.
+#   2. A daily cap on OTP emails in total, kept below Google's limit.
+# Tune them with environment variables (Railway Variables tab or your local .env).
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+OTP_EMAIL_DAILY_CAP = _env_int('OTP_EMAIL_DAILY_CAP', 70)                       # Gmail allows ~100/day
+REGISTER_PER_IP_PER_HOUR = _env_int('REGISTER_PER_IP_PER_HOUR', 10)
+GOOGLE_LOGIN_PER_IP_PER_HOUR = _env_int('GOOGLE_LOGIN_PER_IP_PER_HOUR', 15)
+RESEND_PER_IP_PER_HOUR = _env_int('RESEND_PER_IP_PER_HOUR', 20)
+
+
+def client_ip(request):
+    """
+    The caller's IP address.
+
+    Railway's edge proxy always sets X-Real-IP to the connecting client's address and replaces any
+    copy the client sent, so on Railway that header is the one to trust. When it is missing (local
+    development) fall back to the socket address.
+    """
+    candidate = (request.META.get('HTTP_X_REAL_IP') or '').strip()
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return request.META.get('REMOTE_ADDR') or 'unknown'
+
+
+def rate_limit_exceeded(scope, request, limit, window_seconds=3600):
+    """
+    Counts this call and returns True once the caller's IP is over `limit` calls in the window.
+
+    Counters live in Django's cache. With the default in-memory cache each server process counts
+    separately, so with several gunicorn workers the real limit is up to that many times higher.
+    """
+    key = f'ratelimit:{scope}:{client_ip(request)}'
+    if cache.add(key, 1, window_seconds):
+        return False
+    try:
+        count = cache.incr(key)
+    except ValueError:  # the counter expired between add() and incr()
+        cache.add(key, 1, window_seconds)
+        return False
+    return count > limit
+
+
+def email_quota_reached():
+    """
+    True when the last 24 hours already hold OTP_EMAIL_DAILY_CAP codes, counted from the database
+    (shared by every worker). A resend moves a challenge's timestamp instead of adding a row, so
+    this slightly undercounts: that is why the cap sits well below Gmail's 100 a day.
+    """
+    since = timezone.now() - timedelta(hours=24)
+    sent = (
+        EmailOTPVerification.objects.filter(last_sent_at__gte=since).count()
+        + GoogleOTPVerification.objects.filter(last_sent_at__gte=since).count()
+    )
+    return sent >= OTP_EMAIL_DAILY_CAP
+
+
+def too_many_requests():
+    return Response(
+        {'error': 'Too many requests. Please try again later.'},
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
+    )
+
+
+def emails_unavailable():
+    return Response(
+        {'error': 'Verification emails are temporarily unavailable. Please try again later.'},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 def get_tokens_for_user(household):
@@ -85,6 +172,9 @@ def get_valid_trusted_device(household, raw_token):
 @permission_classes([AllowAny])
 def register(request):
     """Create a household account and send an email verification OTP."""
+    if rate_limit_exceeded('register', request, REGISTER_PER_IP_PER_HOUR):
+        return too_many_requests()
+
     data = request.data
 
     first_name = str(data.get('first_name') or '').strip()
@@ -103,6 +193,9 @@ def register(request):
             {'error': 'Email already registered'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    if email_quota_reached():
+        return emails_unavailable()
 
     try:
         with transaction.atomic():
@@ -153,22 +246,23 @@ def register(request):
                 )
                 if sent != 1:
                     raise Exception("Failed to send email")
-            except Exception as exc:
+            except Exception:
+                # The details stay in the server log; the phone only gets a generic message.
                 logger.exception("Email sending failed during registration.")
                 # If email fails, raise an error so the transaction rolls back
-                raise RuntimeError(f"Email failed: {str(exc)}")
+                raise RuntimeError('email failed')
 
-    except RuntimeError as e:
+    except RuntimeError:
         # This catches the email failure
         return Response(
-            {'error': str(e)},
+            {'error': 'Could not send the verification email. Please try again later.'},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    except Exception as e:
-        # This catches ANY other database error and tells us exactly what it is
+    except Exception:
+        # Any other database error: logged in full, not shown to the user
         logger.exception("Registration database failed.")
         return Response(
-            {'error': f'Database Error: {str(e)}'},
+            {'error': 'Could not create the account. Please try again.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -505,6 +599,10 @@ def login(request):
         )
 
     # Unknown, expired, or revoked device: continue with email OTP.
+    # (Trusted devices above send no email, so they never touch the daily email cap.)
+    if email_quota_reached():
+        return emails_unavailable()
+
     now = timezone.now()
     otp = f'{secrets.randbelow(1_000_000):06d}'
 
@@ -593,6 +691,8 @@ def login(request):
 @permission_classes([AllowAny])
 def google_login(request):
     """Validate Google identity and send an OTP before issuing JWT tokens."""
+    if rate_limit_exceeded('google_login', request, GOOGLE_LOGIN_PER_IP_PER_HOUR):
+        return too_many_requests()
 
     google_token = request.data.get('google_token')
 
@@ -651,6 +751,10 @@ def google_login(request):
             {'error': 'Google must provide a verified email address'},
             status=status.HTTP_401_UNAUTHORIZED,
         )
+
+    # Only a valid Google token gets this far, so it is safe to spend email quota here.
+    if email_quota_reached():
+        return emails_unavailable()
 
     first_name = (google_data.get('given_name') or '')[:100]
     last_name = (google_data.get('family_name') or '')[:100]
@@ -916,6 +1020,8 @@ def resend_google_otp(request):
     Resend a code with cooldown and resend limits.
     Works for Google, Login, and Registration OTPs.
     """
+    if rate_limit_exceeded('resend', request, RESEND_PER_IP_PER_HOUR):
+        return too_many_requests()
 
     challenge_id = request.data.get('challenge_id')
 
@@ -991,6 +1097,9 @@ def resend_google_otp(request):
                 },
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
+
+        if email_quota_reached():
+            return emails_unavailable()
 
         otp = f'{secrets.randbelow(1_000_000):06d}'
 
